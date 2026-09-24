@@ -109,7 +109,7 @@ class Profiler {
     if (this.slowest.length < 10 || ms > this.slowest[this.slowest.length - 1].ms) {
       // a match can start in the middle of a tick, which resets the running tick
       const sections = Object.fromEntries(Object.entries(this.current || {}).map(([k, v]) => [k, round(v, 3)]));
-      this.slowest.push({ ms: round(ms, 3), atSec: round((Date.now() - this.startedAt) / 1000, 1), sections });
+      this.slowest.push({ ms: round(ms, 3), at: new Date().toISOString(), atSec: round((Date.now() - this.startedAt) / 1000, 1), sections });
       this.slowest.sort((a, b) => b.ms - a.ms);
       this.slowest.length = Math.min(this.slowest.length, 10);
     }
@@ -125,6 +125,7 @@ class Profiler {
     this._lastTickIndex = this.ticks.length;
     recent.sort((a, b) => a - b);
     const entry = {
+      at: new Date().toISOString(),
       atSec: round((Date.now() - this.startedAt) / 1000, 1),
       tickAvgMs: round(recent.reduce((a, b) => a + b, 0) / (recent.length || 1), 3),
       tickP95Ms: round(percentile(recent, 0.95), 3),
@@ -143,6 +144,16 @@ class Profiler {
     this._lastSections = new Map([...this.sections.entries()].map(([k, v]) => [k, v.total]));
     const g = Object.entries(gauges).map(([k, v]) => `${k} ${v}`).join(' ');
     console.log(`[profile] ${entry.atSec}s tick avg ${entry.tickAvgMs} p95 ${entry.tickP95Ms} max ${entry.tickMaxMs} ms | ms/tick: ${deltas} | ${g} | heap ${entry.heapMB} MB, loop delay p99 ${lateMs(this.eld.percentile(99))} ms`);
+  }
+
+  // Saves a report uploaded by a browser (see public/js/perf.js).
+  saveClient(report, text) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const who = String(report?.name ?? 'player').replace(/[^\w-]/g, '').slice(0, 16) || 'player';
+    const base = path.join(DIR, `browser-${stamp}-${who}`);
+    fs.writeFileSync(`${base}.json`, JSON.stringify(report, null, 2));
+    if (typeof text === 'string') fs.writeFileSync(`${base}.txt`, text.slice(0, 1_000_000));
+    console.log(`[profile] saved browser report ${base}.txt`);
   }
 
   matchStart(meta) {
@@ -238,7 +249,7 @@ class Profiler {
     const pad = (s, n) => String(s).padEnd(n);
     const lpad = (s, n) => String(s).padStart(n);
     lines.push(`Splatter server profile (${r.reason})`);
-    lines.push(`duration ${r.durationSec}s, humans ${r.humans ?? '?'}, bots ${r.bots ?? '?'}`);
+    lines.push(`duration ${r.durationSec}s, humans ${r.humans ?? '?'}, bots ${r.bots ?? '?'} (times in UTC)`);
     lines.push('');
     lines.push(`Simulation ticks (budget ${round(TICK_BUDGET_MS, 1)} ms)`);
     lines.push(`  ${r.ticks.count} ticks, avg ${r.ticks.avgMs} ms, p50 ${r.ticks.p50Ms}, p95 ${r.ticks.p95Ms}, p99 ${r.ticks.p99Ms}, max ${r.ticks.maxMs}`);
@@ -265,13 +276,13 @@ class Profiler {
     lines.push('Slowest ticks');
     for (const t of r.slowestTicks) {
       const top = Object.entries(t.sections).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => `${k} ${v}`).join(', ');
-      lines.push(`  ${lpad(t.ms, 8)} ms at ${t.atSec}s: ${top}`);
+      lines.push(`  ${lpad(t.ms, 8)} ms at ${t.atSec}s (${t.at.slice(11, 19)} UTC): ${top}`);
     }
     lines.push('');
     lines.push('Timeline (every 5 s)');
     for (const t of r.timeline) {
-      const g = Object.entries(t).filter(([k]) => !['atSec', 'tickAvgMs', 'tickP95Ms', 'tickMaxMs', 'heapMB'].includes(k)).map(([k, v]) => `${k} ${v}`).join(', ');
-      lines.push(`  ${lpad(t.atSec, 6)}s  tick avg ${t.tickAvgMs} p95 ${t.tickP95Ms} max ${t.tickMaxMs} ms, heap ${t.heapMB} MB, ${g}`);
+      const g = Object.entries(t).filter(([k]) => !['at', 'atSec', 'tickAvgMs', 'tickP95Ms', 'tickMaxMs', 'heapMB'].includes(k)).map(([k, v]) => `${k} ${v}`).join(', ');
+      lines.push(`  ${lpad(t.atSec, 6)}s ${t.at.slice(11, 19)}  tick avg ${t.tickAvgMs} p95 ${t.tickP95Ms} max ${t.tickMaxMs} ms, heap ${t.heapMB} MB, ${g}`);
     }
     return lines.join('\n') + '\n';
   }

@@ -241,3 +241,13 @@ label, .label {
 #botCount { min-width: 20px; text-align: center; font-weight: 900; font-size: 18px; }
 .bot-settings.readonly .stepper .btn, .bot-settings.readonly .toggle input { pointer-events: none; opacity: .45; }
 #startMatch { margin: 8px 0 14px; }
+
+/* Browser profiler panel (?profile) */
+#perfPanel {
+  position: fixed; left: 12px; bottom: 12px; z-index: 50; pointer-events: auto;
+  background: rgba(20, 20, 24, .82); color: #e8e8ec; border-radius: 6px; padding: 8px 10px;
+  font: 11px/1.35 ui-monospace, Menlo, monospace;
+}
+#perfPanel pre { margin: 0 0 6px; font: inherit; white-space: pre; }
+#perfPanel button { font: 700 11px var(--font); padding: 3px 8px; cursor: pointer; }
+#perfPanel a { color: #9fd0ff; margin-left: 8px; }

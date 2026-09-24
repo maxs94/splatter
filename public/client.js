@@ -7,6 +7,7 @@ import { createViewer } from './js/viewer.js';
 import { createPaintFlow, SIM_PPM } from './js/paintflow.js';
 import { createFluid } from './js/fluid.js';
 import { createRagdoll } from './js/ragdoll.js';
+import { perf } from './js/perf.js';
 
 const $ = id => document.getElementById(id);
 const TAU = Math.PI * 2;
@@ -15,6 +16,7 @@ const PALETTE_RGB = PALETTE.map(hex => [1, 3, 5].map(i => parseInt(hex.slice(i, 
 // ---------------------------------------------------------------- Renderer
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.info.autoReset = false; // counted per frame (several passes), reset in gameFrame
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
@@ -208,6 +210,13 @@ function paintCircles(f, sp, circles, base, mask = true) {
 // mode: 'live' simulates the paint running down walls in real time, 'instant' runs
 // that simulation to the end right away, 'static' skips it (cheap replays).
 function paintSplat(sp, mode = 'live') {
+  const t = perf.begin();
+  perf.count(`paint.splats.${mode}`);
+  paintSplatInner(sp, mode);
+  perf.end('paint.splat', t);
+}
+
+function paintSplatInner(sp, mode) {
   const { circles, tint } = splatShape(sp.r, sp.s);
   const rgb = PALETTE_RGB[sp.c] || PALETTE_RGB[0];
   const reach = sp.r * 2;
@@ -270,6 +279,13 @@ function startFlow(f, sp, core, base, instant) {
 
 // Draw a settled flow into the wall canvas (and puddles where it reached the floor).
 function bakeFlow(fl, thick) {
+  const t = perf.begin();
+  perf.count('paint.bakes');
+  bakeFlowInner(fl, thick);
+  perf.end('paint.bake', t);
+}
+
+function bakeFlowInner(fl, thick) {
   const targets = fl.face.floor
     ? faces.filter(g => g.floor && g.umin < fl.u1 && fl.u0 < g.umax && g.vmin < fl.v1 && fl.v0 < g.vmax)
     : [fl.face];
@@ -407,7 +423,13 @@ function groundPaintAt(x, y, z) {
 
 function flushPaint() {
   for (const f of faces) {
-    if (f.dirty) { f.tex.needsUpdate = true; f.mtex.needsUpdate = true; f.dirty = false; }
+    if (f.dirty) {
+      f.tex.needsUpdate = true;
+      f.mtex.needsUpdate = true;
+      f.dirty = false;
+      perf.count('paint.textureUploads', 2);
+      perf.count('paint.uploadedPixels', f.canvas.width * f.canvas.height * 2);
+    }
   }
 }
 
@@ -640,8 +662,10 @@ function updateAvatar(av, dt, k) {
 
   // limp body: the ragdoll moves the bones instead of the animations
   if (av.dead && av.ragdoll?.active) {
+    const t = perf.begin();
     av.ragdoll.step(dt);
     av.ragdoll.apply();
+    perf.end('ragdoll', t);
     return;
   }
 
@@ -835,7 +859,12 @@ function connect(name, color) {
   closeMessage = '';
   ws = new WebSocket(`${proto}://${location.host}`);
   ws.onopen = () => send({ t: 'join', name, color, cid: clientId });
-  ws.onmessage = e => handle(JSON.parse(e.data));
+  ws.onmessage = e => {
+    const t = performance.now();
+    const m = JSON.parse(e.data);
+    handle(m);
+    perf.message(m.t, e.data.length, performance.now() - t);
+  };
   ws.onclose = () => {
     clearMatch();
     showScreen('menu');
@@ -846,14 +875,20 @@ function connect(name, color) {
 }
 
 function leave() {
+  if (screen === 'game') perf.finish('left the match');
   leaving = true;
   if (ws) ws.close();
 }
 // Close the connection right away when the page goes (refresh, tab closed), so the
 // player leaves the lobby immediately instead of lingering.
-window.addEventListener('pagehide', () => { if (ws) { leaving = true; ws.close(); } });
+window.addEventListener('pagehide', () => {
+  if (screen === 'game') perf.flushOnExit('left the page');
+  if (ws) { leaving = true; ws.close(); }
+});
 
 function enterGame(m) {
+  perf.reset();
+  perf.meta = { name: roster.get(me.id)?.name ?? $('name').value, joinedPhase: m.round.state };
   clearMatch();
   for (const p of m.players) addRoster(p);
   clearPaint();
@@ -1004,7 +1039,10 @@ function handle(m) {
     case 'round':
       setRound(m.round);
       if (m.round.state === 'playing') round.goUntil = performance.now() + 900;
-      if (m.round.state === 'ended') showRoundEnd(m.scores);
+      if (m.round.state === 'ended') {
+        showRoundEnd(m.scores);
+        perf.finish('match ended');
+      }
       break;
   }
 }
@@ -1343,7 +1381,17 @@ let lastFrame = performance.now();
 let stateTimer = 0;
 let wasOnGround = true;
 
+// Sections of a game frame, timed when profiling (?profile).
+function timed(name, fn) {
+  const t = perf.begin();
+  fn();
+  perf.end(name, t);
+}
+
 function gameFrame(now, dt) {
+  const frame = perf.frameStart(now);
+  renderer.info.reset();
+  const tp = perf.begin();
   if (me.alive) {
     const canMove = locked() && round.state === 'playing';
     const inp = {
@@ -1392,16 +1440,24 @@ function gameFrame(now, dt) {
     viewGun.rotation.x = recoil * 0.2;
   }
 
-  const k = 1 - Math.exp(-15 * dt);
-  for (const av of avatars.values()) updateAvatar(av, dt, k);
+  perf.end('player', tp);
 
-  updateProjectiles(dt);
-  paintFlow.update(dt, bakeFlow);
-  updateFootprints(dt);
-  updateHud(now, dt);
-  flushPaint();
-  fluid.update(dt);
-  fluid.render(scene, camera);
+  const k = 1 - Math.exp(-15 * dt);
+  timed('avatars', () => { for (const av of avatars.values()) updateAvatar(av, dt, k); });
+  timed('projectiles', () => updateProjectiles(dt));
+  timed('paintflow', () => paintFlow.update(dt, bakeFlow));
+  timed('footprints', () => updateFootprints(dt));
+  timed('hud', () => updateHud(now, dt));
+  timed('flushPaint', flushPaint);
+  timed('fluid.update', () => fluid.update(dt));
+  timed('render', () => fluid.render(scene, camera));
+  if (perf.enabled) {
+    perf.frameEnd(frame, {
+      overlays: paintFlow.flows.length, liveFlows: paintFlow.flows.filter(f => f.live).length,
+      drops: fluid.drops.length, footprints: footprints.length, avatars: avatars.size,
+      calls: renderer.info.render.calls, textures: renderer.info.memory.textures,
+    });
+  }
 }
 
 renderer.setAnimationLoop(() => {

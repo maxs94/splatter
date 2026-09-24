@@ -36,6 +36,29 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const SHARED_DIR = path.join(__dirname, 'shared');
 
 const server = http.createServer((req, res) => {
+  // Browser profiles (?profile) are uploaded here and saved next to the server's.
+  if (req.method === 'POST' && req.url === '/api/client-profile') {
+    if (!prof.enabled) { res.writeHead(403); return res.end('profiling is off (PROFILE=1)'); }
+    let size = 0;
+    const chunks = [];
+    req.on('data', c => {
+      size += c.length;
+      if (size > 4 * 1024 * 1024) { res.writeHead(413); res.end(); req.destroy(); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      if (res.writableEnded) return;
+      try {
+        const { report, text } = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        prof.saveClient(report, text);
+        res.writeHead(204);
+      } catch {
+        res.writeHead(400);
+      }
+      res.end();
+    });
+    return;
+  }
   let urlPath;
   try {
     urlPath = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
