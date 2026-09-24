@@ -44,9 +44,9 @@ window.addEventListener('resize', () => {
 });
 
 // ---------------------------------------------------------------- Paintable level
-// Every visible box face is a quad with its own paint textures on the GPU (see
-// js/surfaces.js). Unpainted, it is exactly as white as the background, so the level
-// is invisible until painted.
+// Every visible box face is a quad with its own rectangle in a shared paint texture on
+// the GPU (see js/surfaces.js). Unpainted, it is exactly as white as the background, so
+// the level is invisible until painted.
 
 const PPM = 32; // texture pixels per meter
 // Per-face brightness so painted areas read as 3D: +x, -x, +y, -y, +z, -z
@@ -123,39 +123,45 @@ for (const b of LEVEL.boxes) {
       const face = {
         axis, sign, ua, va, plane, umin, umax, vmin, vmax,
         shade: SHADE[axis * 2 + (sign > 0 ? 0 : 1)], floor: !!b.floor,
+        texels: [
+          Math.min(2048, Math.max(4, Math.ceil((umax - umin) * PPM))),
+          Math.min(2048, Math.max(4, Math.ceil((vmax - vmin) * PPM))),
+        ],
       };
-      surfaces.create(face,
-        Math.min(2048, Math.max(4, Math.ceil((umax - umin) * PPM))),
-        Math.min(2048, Math.max(4, Math.ceil((vmax - vmin) * PPM))));
       // Upward faces remember where paint is, so footprints can pick it up.
       if (axis === 1 && sign > 0) face.ground = makeGroundGrid(face);
-
-      const pos = [], uv = [];
-      for (const [u, v] of [[umin, vmin], [umax, vmin], [umax, vmax], [umin, vmax]]) {
-        const p = [0, 0, 0];
-        p[axis] = plane; p[ua] = u; p[va] = v;
-        pos.push(...p);
-        uv.push((u - umin) / (umax - umin), (v - vmin) / (vmax - vmin));
-      }
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-      geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
-      geo.setIndex([0, 1, 2, 0, 2, 3]);
-      const mesh = new THREE.Mesh(geo, new THREE.ShaderMaterial({
-        uniforms: { map: { value: face.surf.color.texture }, mask: { value: face.surf.mask.texture } },
-        vertexShader: PAINT_VERTEX, fragmentShader: PAINT_FRAGMENT, side: THREE.DoubleSide,
-      }));
-      scene.add(mesh);
       faces.push(face);
     }
   }
 }
 
-function clearPaint() {
+// The whole level is one mesh, drawn in one call with the shared paint textures.
+surfaces.build(faces);
+{
+  const pos = [], uv = [], index = [];
   for (const f of faces) {
-    surfaces.clear(f);
-    if (f.ground) f.ground.set.fill(0);
+    const base = pos.length / 3;
+    for (const [u, v] of [[f.umin, f.vmin], [f.umax, f.vmin], [f.umax, f.vmax], [f.umin, f.vmax]]) {
+      const p = [0, 0, 0];
+      p[f.axis] = f.plane; p[f.ua] = u; p[f.va] = v;
+      pos.push(...p);
+      uv.push(...surfaces.uv(f, u, v));
+    }
+    index.push(base, base + 1, base + 2, base, base + 2, base + 3);
   }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setIndex(index);
+  scene.add(new THREE.Mesh(geo, new THREE.ShaderMaterial({
+    uniforms: { map: { value: surfaces.color.texture }, mask: { value: surfaces.mask.texture } },
+    vertexShader: PAINT_VERTEX, fragmentShader: PAINT_FRAGMENT, side: THREE.DoubleSide,
+  })));
+}
+
+function clearPaint() {
+  surfaces.clear();
+  for (const f of faces) if (f.ground) f.ground.set.fill(0);
   paintFlow.clear();
   clearFootprints();
 }

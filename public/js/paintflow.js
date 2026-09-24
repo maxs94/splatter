@@ -12,7 +12,7 @@
 // its place in the live one. All splats are drawn by one instanced quad just in front
 // of their surface, with a crisp edge and lighting from the thickness, including a view
 // dependent wet highlight. When the settled atlas is full, the oldest splat is baked
-// into its surface's paint (js/surfaces.js), also on the GPU: nothing is read back,
+// into the level's paint atlas (js/surfaces.js), also on the GPU: nothing is read back,
 // except the bottom row of splats that ran down to the floor (for the puddles).
 
 import * as THREE from 'three';
@@ -232,7 +232,9 @@ const BAKE_FRAGMENT = `
   uniform vec3 lin;     // paint color, linear
   uniform vec3 U, V, N, H;
   uniform float pass;   // 0: color, 1: coverage mask
+  uniform vec4 bounds;  // the face, so its padding in the paint atlas repeats the edge
   varying vec2 vP;
+  vec2 p;
   float at(vec2 uv) {
     vec2 s = clamp((uv - region.xy) * ${SIM_PPM.toFixed(1)} - 0.5, vec2(0.0), slot.zw - 1.001);
     return texture2D(src, (slot.xy + s + 0.5) / srcSize).r;
@@ -253,7 +255,8 @@ const BAKE_FRAGMENT = `
     return n / 16.0;
   }
   void main() {
-    float cover = coverage(vP);
+    p = clamp(vP, bounds.xy, bounds.zw);
+    float cover = coverage(p);
     if (pass > 0.5) {
       if (cover <= 0.0) discard;
       gl_FragColor = vec4(cover, 0.0, 0.0, 1.0);
@@ -263,13 +266,13 @@ const BAKE_FRAGMENT = `
     // the border, and where it overlaps other paint the border stays smooth.
     float grown = cover;
     for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
-      grown = max(grown, coverage(vP + vec2(x, y) * 2.0 * region.zw));
+      grown = max(grown, coverage(p + vec2(x, y) * 2.0 * region.zw));
     }
-    float t = at(vP);
+    float t = at(p);
     if (t < 0.01 && grown <= 0.0) discard;
     float e = 2.0 / ${SIM_PPM.toFixed(1)}; // same slope distance as the draw shader
-    float hx = at(vP + vec2(e, 0.0)) - at(vP - vec2(e, 0.0));
-    float hy = at(vP + vec2(0.0, e)) - at(vP - vec2(0.0, e));
+    float hx = at(p + vec2(e, 0.0)) - at(p - vec2(e, 0.0));
+    float hy = at(p + vec2(0.0, e)) - at(p - vec2(0.0, e));
     vec3 n = normalize(-hx * 1.6 * U - hy * 1.6 * V + N);
     vec3 L = normalize(vec3(0.35, 0.8, 0.5));
     float diff = 0.7 + 0.38 * max(dot(n, L), 0.0);
@@ -360,6 +363,7 @@ export function createPaintFlow(renderer, scene, blit, surfaces, { onBottomRow }
     src: { value: null }, srcSize: { value: new THREE.Vector2() }, slot: { value: new THREE.Vector4() },
     region: { value: new THREE.Vector4() }, lin: { value: new THREE.Vector3() },
     U: { value: new THREE.Vector3() }, V: { value: new THREE.Vector3() }, N: { value: new THREE.Vector3() }, H: { value: new THREE.Vector3() },
+    bounds: { value: new THREE.Vector4() },
   });
   const bakeColor = rectMat(BAKE_FRAGMENT, { ...bakeUniforms(), pass: { value: 0 } });
   bakeColor.transparent = true;
@@ -503,26 +507,24 @@ export function createPaintFlow(renderer, scene, blit, surfaces, { onBottomRow }
       u.lin.value.set(...fl.base.map(c => Math.pow(c / 255, 2.2)));
     }
     for (const f of fl.targets) {
-      const u0 = Math.max(fl.u0, f.umin), u1 = Math.min(fl.u1, f.umax);
-      const v0 = Math.max(fl.v0, f.vmin), v1 = Math.min(fl.v1, f.vmax);
-      if (u1 <= u0 || v1 <= v0) continue;
+      const reg = surfaces.region(f, fl.u0, fl.v0, fl.u1, fl.v1);
+      if (!reg) continue;
       const du = f.umax - f.umin, dv = f.vmax - f.vmin;
       const N = [0, 0, 0];
       N[f.axis] = f.sign;
       const H = new THREE.Vector3(L[0] / ll + N[0], L[1] / ll + N[1], L[2] / ll + N[2]).normalize();
       for (const m of [bakeColor, bakeMask]) {
         const u = m.uniforms;
-        u.rect.value.set((u0 - f.umin) / du, (v0 - f.vmin) / dv, (u1 - f.umin) / du, (v1 - f.vmin) / dv);
-        u.area.value.set(u0, v0, u1, v1);
+        surfaces.apply(m, reg);
         u.region.value.set(fl.u0, fl.v0, 0.5 * du / f.surf.w, 0.5 * dv / f.surf.h);
         u.U.value.set(0, 0, 0).setComponent(f.ua, 1);
         u.V.value.set(0, 0, 0).setComponent(f.va, 1);
         u.N.value.set(...N);
         u.H.value.copy(H);
       }
-      blit.draw(f.surf.mask, bakeMask);
-      blit.draw(f.surf.color, bakeColor);
-      surfaces.touch(f);
+      blit.draw(surfaces.mask, bakeMask);
+      blit.draw(surfaces.color, bakeColor);
+      surfaces.touch();
     }
     if (fl.bottomRow) readBottomRow(fl, source, size);
     perf.end('paint.bake', t);
