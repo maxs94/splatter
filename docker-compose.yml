@@ -4,6 +4,6 @@ services:
     ports:
       - "3000:3000"
     environment:
-      BOTS: "4"        # bots fill the arena up to this many players
+      BOTS: "3"        # default number of bots in a new lobby (the leader can change it)
       BOT_SKILL: "0.4" # 0 = hopeless, 1 = sharp
     restart: unless-stopped

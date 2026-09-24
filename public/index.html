@@ -55,8 +55,16 @@
       <h1 class="lobby-title">Lobby</h1>
       <p id="lobbyStatus" class="lobby-status"></p>
       <ul id="lobbyList"></ul>
+      <div class="bot-settings">
+        <label class="toggle"><input type="checkbox" id="botsEnabled"> Bots</label>
+        <div class="stepper">
+          <button id="botsMinus" class="btn" aria-label="Fewer bots">-</button>
+          <span id="botCount">3</span>
+          <button id="botsPlus" class="btn" aria-label="More bots">+</button>
+        </div>
+      </div>
+      <p id="botSummary" class="hint"></p>
       <button id="startMatch" class="btn primary big">Start match</button>
-      <p class="hint">Bots fill the empty slots when the match starts.</p>
       <div class="buttons">
         <button id="openViewer" class="btn">Animation viewer</button>
         <button id="leaveLobby" class="btn">Leave</button>

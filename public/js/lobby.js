@@ -1,5 +1,5 @@
 // Lobby scene: every joined player stands on a small stage in their chosen color,
-// holding their gun, with a name tag above their head.
+// dancing, with a name tag above their head.
 
 import * as THREE from 'three';
 import { PALETTE } from '/shared/game.js';
@@ -33,8 +33,8 @@ export function createLobby(renderer, labelsEl, panelWidth) {
   camera.position.set(0, 1.7, 7.2);
   camera.lookAt(0, 1.0, 0);
 
-  const gunDark = new THREE.MeshStandardMaterial({ color: 0x2a2a2e, roughness: 0.5, metalness: 0.2 });
   const entries = new Map(); // id -> { ch, label, color }
+  let labelsHidden = true;
 
   function setPlayers(players, leaderId, meId) {
     for (const [id, e] of entries) {
@@ -48,8 +48,8 @@ export function createLobby(renderer, labelsEl, panelWidth) {
       let e = entries.get(p.id);
       if (!e) {
         const body = new THREE.MeshStandardMaterial({ roughness: 0.55 });
-        const shell = new THREE.MeshStandardMaterial({ roughness: 0.4 });
-        const ch = createCharacter({ bodyMat: body, gunShellMat: shell, gunDarkMat: gunDark, castShadow: true });
+        // no gun in the lobby, just the player dancing
+        const ch = createCharacter({ bodyMat: body, castShadow: true });
         // Every player loops their own silly dance; ids are sequential, so neighbours differ.
         const fun = funClipNames();
         setAnim(ch, fun[p.id % fun.length], 0);
@@ -57,13 +57,13 @@ export function createLobby(renderer, labelsEl, panelWidth) {
         scene.add(ch.root);
         const label = document.createElement('div');
         label.className = 'name-label';
+        label.hidden = labelsHidden;
         labelsEl.appendChild(label);
-        e = { ch, label, body, shell };
+        e = { ch, label, body };
         entries.set(p.id, e);
       }
       const color = new THREE.Color(PALETTE[p.color]);
       e.body.color.copy(color);
-      e.shell.color.copy(color).lerp(new THREE.Color(0xffffff), 0.35);
       e.label.style.setProperty('--c', PALETTE[p.color]);
       e.label.innerHTML = `${p.id === leaderId ? CROWN : ''}<span>${esc(p.name)}</span>${p.id === meId ? '<em>you</em>' : ''}`;
       e.index = i;
@@ -74,8 +74,7 @@ export function createLobby(renderer, labelsEl, panelWidth) {
       const x = (e.index - (n - 1) / 2) * 1.25;
       e.ch.root.position.set(x, 0, -Math.abs(x) * 0.3);
       const dx = camera.position.x - x, dz = camera.position.z - e.ch.root.position.z;
-      // turned a little so the gun shows in profile
-      e.ch.root.rotation.y = Math.atan2(-dx, -dz) + 0.6;
+      e.ch.root.rotation.y = Math.atan2(-dx, -dz);
     }
   }
 
@@ -101,6 +100,7 @@ export function createLobby(renderer, labelsEl, panelWidth) {
   }
 
   function hideLabels(hidden) {
+    labelsHidden = hidden;
     for (const e of entries.values()) e.label.hidden = hidden;
   }
 

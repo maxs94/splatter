@@ -4,6 +4,9 @@ import { initAudio, play, tone, updateListener, getVolume, setVolume } from './j
 import { assetsReady, createCharacter, cloneGun, locomotion, poseCharacter, setAnim } from './js/characters.js';
 import { createLobby } from './js/lobby.js';
 import { createViewer } from './js/viewer.js';
+import { createPaintFlow, SIM_PPM } from './js/paintflow.js';
+import { createFluid } from './js/fluid.js';
+import { createRagdoll } from './js/ragdoll.js';
 
 const $ = id => document.getElementById(id);
 const TAU = Math.PI * 2;
@@ -40,11 +43,34 @@ window.addEventListener('resize', () => {
 // Every visible box face is a quad with its own canvas texture. Unpainted, it is
 // exactly as white as the background, so the level is invisible until painted.
 
-const PPM = 24; // texture pixels per meter
+const PPM = 32; // texture pixels per meter
 // Per-face brightness so painted areas read as 3D: +x, -x, +y, -y, +z, -z
 const SHADE = [0.8, 0.7, 1.0, 0.55, 0.9, 0.78];
 const faces = [];
 const maxAniso = renderer.capabilities.getMaxAnisotropy();
+
+// Paint edges come from a separate coverage mask: bilinear filtering of the mask gives
+// smooth curves, and the shader cuts a sharp, anti-aliased edge at 50% coverage, so
+// borders stay smooth even though the paint textures are low resolution. The color
+// texture is painted slightly larger than the mask so edges don't get a light fringe.
+const PAINT_VERTEX = `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }`;
+const PAINT_FRAGMENT = `
+  uniform sampler2D map;
+  uniform sampler2D mask;
+  varying vec2 vUv;
+  void main() {
+    vec3 col = texture2D(map, vUv).rgb;
+    float m = texture2D(mask, vUv).r;
+    float w = max(fwidth(m) * 0.7, 0.002);
+    float e = smoothstep(0.5 - w, 0.5 + w, m);
+    gl_FragColor = vec4(mix(vec3(1.0), col, e), 1.0);
+    #include <colorspace_fragment>
+  }`;
 
 for (const b of LEVEL.boxes) {
   for (let axis = 0; axis < 3; axis++) {
@@ -60,12 +86,22 @@ for (const b of LEVEL.boxes) {
       const canvas = document.createElement('canvas');
       canvas.width = Math.min(2048, Math.max(4, Math.ceil((umax - umin) * PPM)));
       canvas.height = Math.min(2048, Math.max(4, Math.ceil((vmax - vmin) * PPM)));
-      const ctx = canvas.getContext('2d');
+      // Paint is read back for the drip simulation and footprints, so keep canvases on the CPU.
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
       ctx.fillStyle = '#fff';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       const tex = new THREE.CanvasTexture(canvas);
       tex.colorSpace = THREE.SRGBColorSpace;
       tex.anisotropy = maxAniso;
+      const maskCanvas = document.createElement('canvas');
+      maskCanvas.width = canvas.width;
+      maskCanvas.height = canvas.height;
+      const mctx = maskCanvas.getContext('2d', { willReadFrequently: true });
+      mctx.fillStyle = '#000';
+      mctx.fillRect(0, 0, canvas.width, canvas.height);
+      const mtex = new THREE.CanvasTexture(maskCanvas);
+      mtex.colorSpace = THREE.NoColorSpace;
+      mtex.anisotropy = maxAniso;
 
       const pos = [], uv = [];
       for (const [u, v] of [[umin, vmin], [umax, vmin], [umax, vmax], [umin, vmax]]) {
@@ -78,13 +114,16 @@ for (const b of LEVEL.boxes) {
       geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
       geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
       geo.setIndex([0, 1, 2, 0, 2, 3]);
-      const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide }));
+      const mesh = new THREE.Mesh(geo, new THREE.ShaderMaterial({
+        uniforms: { map: { value: tex }, mask: { value: mtex } },
+        vertexShader: PAINT_VERTEX, fragmentShader: PAINT_FRAGMENT, side: THREE.DoubleSide,
+      }));
       scene.add(mesh);
 
       faces.push({
-        axis, sign, ua, va, plane, umin, umax, vmin, vmax, canvas, ctx, tex,
+        axis, sign, ua, va, plane, umin, umax, vmin, vmax, canvas, ctx, tex, maskCanvas, mctx, mtex,
         sx: canvas.width / (umax - umin), sy: canvas.height / (vmax - vmin),
-        shade: SHADE[axis * 2 + (sign > 0 ? 0 : 1)], dirty: false,
+        shade: SHADE[axis * 2 + (sign > 0 ? 0 : 1)], dirty: false, floor: !!b.floor,
       });
     }
   }
@@ -94,18 +133,22 @@ function clearPaint() {
   for (const f of faces) {
     f.ctx.fillStyle = '#fff';
     f.ctx.fillRect(0, 0, f.canvas.width, f.canvas.height);
+    f.mctx.fillStyle = '#000';
+    f.mctx.fillRect(0, 0, f.canvas.width, f.canvas.height);
     f.dirty = true;
   }
+  paintFlow.clear();
+  clearFootprints();
 }
 
 // Splat shape in the hit plane: a lumpy core, flung droplets and a few streaks.
 function splatShape(r, seed) {
   const rng = mulberry32(seed);
   const circles = [[0, 0, r * 0.55]];
-  const lumps = 5 + Math.floor(rng() * 4);
+  const lumps = 6 + Math.floor(rng() * 5);
   for (let i = 0; i < lumps; i++) {
-    const a = rng() * TAU, d = rng() * r * 0.45;
-    circles.push([Math.cos(a) * d, Math.sin(a) * d, r * (0.25 + rng() * 0.3)]);
+    const a = rng() * TAU, d = rng() * r * 0.5;
+    circles.push([Math.cos(a) * d, Math.sin(a) * d, r * (0.22 + rng() * 0.32)]);
   }
   const drops = 6 + Math.floor(rng() * 10);
   for (let i = 0; i < drops; i++) {
@@ -113,51 +156,350 @@ function splatShape(r, seed) {
     circles.push([Math.cos(a) * d, Math.sin(a) * d, rad]);
     if (rng() < 0.4) circles.push([Math.cos(a) * d * 0.8, Math.sin(a) * d * 0.8, rad * 0.7]);
   }
-  return { circles, tint: 0.9 + rng() * 0.1 };
+  return { circles, tint: 0.9 + rng() * 0.1, rng };
+}
+
+const rgbStr = (c, k = 1) => `rgb(${Math.min(255, c[0] * k) | 0},${Math.min(255, c[1] * k) | 0},${Math.min(255, c[2] * k) | 0})`;
+const mixWhite = (c, t) => [c[0] + (255 - c[0]) * t, c[1] + (255 - c[1]) * t, c[2] + (255 - c[2]) * t];
+
+// Paint circles into one face in three layers so the paint reads as a thick, wet
+// blob: a darker rim, the body, and glossy highlights towards the upper left.
+function paintCircles(f, sp, circles, base, mask = true) {
+  const t1 = (sp.a + 1) % 3, t2 = (sp.a + 2) % 3;
+  const c3 = [0, 0, 0];
+  const hits = [];
+  for (const [cx, cy, rad] of circles) {
+    c3[0] = sp.p[0]; c3[1] = sp.p[1]; c3[2] = sp.p[2];
+    c3[t1] += cx; c3[t2] += cy;
+    const dist = Math.abs(c3[f.axis] - f.plane);
+    if (dist >= rad) continue;
+    const rr = Math.sqrt(rad * rad - dist * dist) * f.sx;
+    hits.push([(c3[f.ua] - f.umin) * f.sx, (f.vmax - c3[f.va]) * f.sy, rr]);
+  }
+  if (!hits.length) return false;
+  const layer = (ctx, style, scale, dx, dy, minR = 0, grow = 0) => {
+    ctx.fillStyle = style;
+    ctx.beginPath();
+    for (const [x, y, r] of hits) {
+      if (r < minR) continue;
+      const rr = r * scale + grow;
+      ctx.moveTo(x + dx * r + rr, y + dy * r);
+      ctx.arc(x + dx * r, y + dy * r, rr, 0, TAU);
+    }
+    ctx.fill();
+  };
+  // coverage mask with the exact shape, color slightly larger (see PAINT_FRAGMENT)
+  if (mask) layer(f.mctx, '#fff', 1, 0, 0);
+  const ctx = f.ctx;
+  layer(ctx, rgbStr(base, 0.72), 1, 0, 0, 0, 2);
+  layer(ctx, rgbStr(base), 0.86, -0.04, -0.04);
+  ctx.globalAlpha = 0.28;
+  layer(ctx, rgbStr(mixWhite(base, 0.55)), 0.5, -0.22, -0.26, 3);
+  ctx.globalAlpha = 0.55;
+  layer(ctx, rgbStr(mixWhite(base, 0.85)), 0.16, -0.35, -0.4, 4);
+  ctx.globalAlpha = 1;
+  f.dirty = true;
+  return true;
 }
 
 // Each splat circle is treated as a sphere of paint centered in the hit plane.
 // Every face it intersects gets painted, so splats wrap over edges and corners.
-function paintSplat(sp) {
+// On walls the hit face is handed to the paint simulation below, so it runs down.
+// mode: 'live' simulates the paint running down walls in real time, 'instant' runs
+// that simulation to the end right away, 'static' skips it (cheap replays).
+function paintSplat(sp, mode = 'live') {
   const { circles, tint } = splatShape(sp.r, sp.s);
   const rgb = PALETTE_RGB[sp.c] || PALETTE_RGB[0];
-  const t1 = (sp.a + 1) % 3, t2 = (sp.a + 2) % 3;
   const reach = sp.r * 2;
-  const c3 = [0, 0, 0];
+  const hitFloor = sp.a === 1 && sp.sg > 0 && Math.abs(sp.p[1]) < 1e-3;
 
   for (const f of faces) {
     if (f.axis === sp.a && f.sign !== sp.sg) continue; // back sides
     if (Math.abs(sp.p[f.axis] - f.plane) > reach) continue;
     if (Math.max(f.umin - sp.p[f.ua], sp.p[f.ua] - f.umax) > reach) continue;
     if (Math.max(f.vmin - sp.p[f.va], sp.p[f.va] - f.vmax) > reach) continue;
-
     const k = f.shade * tint;
-    f.ctx.fillStyle = `rgb(${rgb[0] * k | 0},${rgb[1] * k | 0},${rgb[2] * k | 0})`;
-    f.ctx.beginPath();
-    let drew = false;
-    for (const [cx, cy, rad] of circles) {
-      c3[0] = sp.p[0]; c3[1] = sp.p[1]; c3[2] = sp.p[2];
-      c3[t1] += cx; c3[t2] += cy;
-      const dist = Math.abs(c3[f.axis] - f.plane);
-      if (dist >= rad) continue;
-      const rr = Math.sqrt(rad * rad - dist * dist);
-      const x = (c3[f.ua] - f.umin) * f.sx;
-      const y = (f.vmax - c3[f.va]) * f.sy;
-      f.ctx.moveTo(x + rr * f.sx, y);
-      f.ctx.ellipse(x, y, rr * f.sx, rr * f.sy, 0, 0, TAU);
-      drew = true;
+    const base = [rgb[0] * k, rgb[1] * k, rgb[2] * k];
+    const isHitFace = f.axis === sp.a && Math.abs(f.plane - sp.p[sp.a]) < 1e-3 &&
+      sp.p[f.ua] >= f.umin && sp.p[f.ua] <= f.umax && sp.p[f.va] >= f.vmin && sp.p[f.va] <= f.vmax;
+    if (mode !== 'static' && (isHitFace || (hitFloor && f.floor))) {
+      // Flung droplets are drawn as they are; the core of the splat is rendered on the
+      // GPU (see js/paintflow.js) and runs down if it hit a wall. A floor splat's
+      // overlay spans neighbouring floor tiles, which only get the color for footprints.
+      const drops = circles.filter(c => c[2] < sp.r * 0.18), core = circles.filter(c => c[2] >= sp.r * 0.18);
+      paintCircles(f, sp, drops, base);
+      if (isHitFace) startFlow(f, sp, core, base, mode === 'instant');
+      else paintCircles(f, sp, core, base, false);
+      continue;
     }
-    if (drew) {
-      f.ctx.fill();
-      f.dirty = true;
+    paintCircles(f, sp, circles, base);
+  }
+}
+
+// ---------------------------------------------------------------- Running paint
+// Paint on walls runs down: see js/paintflow.js for the GPU simulation. Here the core
+// of a wall splat is handed to it, and settled flows are baked back into the wall's
+// paint canvas (bakeInto below redraws them on the CPU with the same lighting).
+
+const paintFlow = createPaintFlow(renderer, scene);
+
+function startFlow(f, sp, core, base, instant) {
+  const t1 = (sp.a + 1) % 3;
+  const uIsT1 = f.ua === t1;
+  const pu = sp.p[f.ua], pv = sp.p[f.va], r = sp.r;
+  const blobs = core.map(([cx, cy, rad]) => [pu + (uIsT1 ? cx : cy), pv + (uIsT1 ? cy : cx), rad]);
+  const runs = f.axis !== 1; // only walls drip
+  // Floor tiles are one continuous surface, so the overlay may span several of them.
+  const lo = f.floor ? { u: -LEVEL.half, v: -LEVEL.half } : { u: f.umin, v: f.vmin };
+  const hi = f.floor ? { u: LEVEL.half, v: LEVEL.half } : { u: f.umax, v: f.vmax };
+  const u0 = Math.max(lo.u, pu - 1.3 * r), u1 = Math.min(hi.u, pu + 1.3 * r);
+  const v1 = Math.min(hi.v, pv + (runs ? 1.2 : 1.3) * r);
+  const v0 = Math.max(lo.v, runs ? pv - 1.2 * r - 2.6 : pv - 1.3 * r);
+  if (u1 - u0 < 0.1 || v1 - v0 < 0.1) { paintCircles(f, sp, core, base); return; }
+  // Floors: also put the color into the canvas (not the edge mask, so it stays
+  // invisible) so footprints pick up fresh paint before it gets baked.
+  if (!runs) paintCircles(f, sp, core, base, false);
+  const color = new THREE.Color().setRGB(base[0] / 255, base[1] / 255, base[2] / 255, THREE.SRGBColorSpace);
+  const fl = paintFlow.add({ face: f, u0, u1, v0, v1, blobs, color, seed: sp.s, instant, flow: runs });
+  fl.base = base;
+  if (instant) {
+    bakeFlow(fl, paintFlow.readThickness(fl));
+    paintFlow.remove(fl);
+  }
+}
+
+// Draw a settled flow into the wall canvas (and puddles where it reached the floor).
+function bakeFlow(fl, thick) {
+  const targets = fl.face.floor
+    ? faces.filter(g => g.floor && g.umin < fl.u1 && fl.u0 < g.umax && g.vmin < fl.v1 && fl.v0 < g.vmax)
+    : [fl.face];
+  for (const g of targets) bakeInto(g, fl, thick);
+  if (!fl.face.floor) addPuddles(fl, thick);
+}
+
+// Bakes a flow into one surface's paint canvas using the same lighting as the GPU
+// shader (paintflow.js), so a splat doesn't visibly change when it gets baked. Slopes
+// come straight from the simulation grid, so splats spanning floor tiles stay seamless.
+const BAKE_LIGHT = (() => { const l = [0.35, 0.8, 0.5], n = Math.hypot(...l); return l.map(x => x / n); })();
+
+function bakeInto(f, fl, thick) {
+  const x0 = Math.max(0, Math.floor((fl.u0 - f.umin) * f.sx));
+  const x1 = Math.min(f.canvas.width, Math.ceil((fl.u1 - f.umin) * f.sx));
+  const y0 = Math.max(0, Math.floor((f.vmax - fl.v1) * f.sy));
+  const y1 = Math.min(f.canvas.height, Math.ceil((f.vmax - fl.v0) * f.sy));
+  const w = x1 - x0, h = y1 - y0;
+  if (w < 1 || h < 1) return;
+  const at = (u, v) => {
+    const sx = Math.min(fl.w - 1.001, Math.max(0, (u - fl.u0) * SIM_PPM - 0.5));
+    const sy = Math.min(fl.h - 1.001, Math.max(0, (v - fl.v0) * SIM_PPM - 0.5));
+    const ix = sx | 0, iy = sy | 0, fx = sx - ix, fy = sy - iy;
+    const i = iy * fl.w + ix;
+    return (thick[i] * (1 - fx) + thick[i + 1] * fx) * (1 - fy) + (thick[i + fl.w] * (1 - fx) + thick[i + fl.w + 1] * fx) * fy;
+  };
+  const d = 2 / SIM_PPM; // same slope distance as the shader
+  const L = BAKE_LIGHT;
+  // world vectors of the face axes and its normal
+  const U = [0, 0, 0], V = [0, 0, 0], N = [0, 0, 0];
+  U[f.ua] = 1; V[f.va] = 1; N[f.axis] = f.sign;
+  // Baked paint is seen from all sides, so the highlight uses the view along the normal.
+  const H = [L[0] + N[0], L[1] + N[1], L[2] + N[2]];
+  const hl = Math.hypot(...H); H[0] /= hl; H[1] /= hl; H[2] /= hl;
+
+  const bgImg = f.ctx.getImageData(x0, y0, w, h), bgMask = f.mctx.getImageData(x0, y0, w, h);
+  const bg = bgImg.data, bgm = bgMask.data;
+  // the shader lights the color in linear space, so do the same here
+  const lin = fl.base.map(c => Math.pow(c / 255, 2.2));
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const o = (y * w + x) * 4;
+      const u = f.umin + (x0 + x + 0.5) / f.sx, v = f.vmax - (y0 + y + 0.5) / f.sy;
+      if (u < fl.u0 || u > fl.u1 || v < fl.v0 || v > fl.v1) continue;
+      // Edge mask as area coverage: texels on the edge are sampled 4x4 and store the
+      // covered fraction, so the edge shader draws a smooth curve, not stair steps.
+      const du = 0.5 / f.sx, dv = 0.5 / f.sy, TH = 0.045;
+      const c00 = at(u - du, v - dv) > TH, c10 = at(u + du, v - dv) > TH;
+      const c01 = at(u - du, v + dv) > TH, c11 = at(u + du, v + dv) > TH;
+      let cover;
+      if (c00 && c10 && c01 && c11) cover = 1;
+      else if (!c00 && !c10 && !c01 && !c11) cover = 0;
+      else {
+        let n = 0;
+        for (let sy = 0; sy < 4; sy++) {
+          for (let sx = 0; sx < 4; sx++) {
+            if (at(u - du + (sx + 0.5) * du / 2, v - dv + (sy + 0.5) * dv / 2) > TH) n++;
+          }
+        }
+        cover = n / 16;
+      }
+      const m = cover * 255;
+      if (m > bgm[o]) bgm[o] = bgm[o + 1] = bgm[o + 2] = m;
+      const t = at(u, v);
+      if (t < 0.01 && cover === 0) continue;
+      const hx = at(u + d, v) - at(u - d, v), hy = at(u, v + d) - at(u, v - d);
+      let nx = -hx * 1.6 * U[0] - hy * 1.6 * V[0] + N[0];
+      let ny = -hx * 1.6 * U[1] - hy * 1.6 * V[1] + N[1];
+      let nz = -hx * 1.6 * U[2] - hy * 1.6 * V[2] + N[2];
+      const nl = Math.hypot(nx, ny, nz); nx /= nl; ny /= nl; nz /= nl;
+      const diff = 0.7 + 0.38 * Math.max(0, nx * L[0] + ny * L[1] + nz * L[2]);
+      // baked highlights can't follow the view, so keep them to a subtle sheen
+      const spec = Math.pow(Math.max(0, nx * H[0] + ny * H[1] + nz * H[2]), 70) * 0.3;
+      const s = Math.min(1, Math.max(0, t / 0.9));
+      const rim = 1 - 0.16 * s * s * (3 - 2 * s);
+      // color reaches a little beyond the mask edge (no light fringe)
+      const a = cover > 0 ? 1 : Math.min(1, (t - 0.01) / 0.02);
+      for (let c = 0; c < 3; c++) {
+        const col = 255 * Math.pow(Math.min(1, lin[c] * diff * rim + spec), 1 / 2.2);
+        bg[o + c] = bg[o + c] * (1 - a) + col * a;
+      }
     }
   }
+  f.ctx.putImageData(bgImg, x0, y0);
+  f.mctx.putImageData(bgMask, x0, y0);
+  f.dirty = true;
+}
+
+// Puddles below drips that reached the bottom of the wall.
+function addPuddles(fl, thick) {
+  const f = fl.face;
+  if (f.axis === 1 || fl.v0 > f.vmin + 1e-3) return;
+  for (let sx = 0; sx < fl.w; sx += 3) {
+    const t = Math.max(thick[sx], thick[sx + 1] || 0, thick[sx + 2] || 0);
+    if (t < 0.08) continue;
+    const p = [0, 0, 0];
+    p[f.axis] = f.plane + f.sign * 0.08;
+    p[f.ua] = fl.u0 + (sx + 1.5) / SIM_PPM;
+    p[f.va] = f.vmin;
+    const floor = floorFaceAt(p[0], p[1], p[2]);
+    if (!floor) continue;
+    const px = (p[floor.ua] - floor.umin) * floor.sx, py = (floor.vmax - p[floor.va]) * floor.sy;
+    const r = 2 + t * 4;
+    floor.ctx.fillStyle = rgbStr(fl.base, 0.9);
+    floor.ctx.beginPath();
+    floor.ctx.ellipse(px, py, r * 1.3 + 2, r + 2, 0, 0, TAU);
+    floor.ctx.fill();
+    floor.mctx.fillStyle = '#fff';
+    floor.mctx.beginPath();
+    floor.mctx.ellipse(px, py, r * 1.3, r, 0, 0, TAU);
+    floor.mctx.fill();
+    floor.dirty = true;
+    sx += 6;
+  }
+}
+
+// Upward facing surface under a point, if any.
+function floorFaceAt(x, y, z) {
+  for (const f of faces) {
+    if (f.axis !== 1 || f.sign < 0 || Math.abs(f.plane - y) > 0.08) continue;
+    if (x >= f.umin && x <= f.umax && z >= f.vmin && z <= f.vmax) return f;
+  }
+  return null;
+}
+
+// Paint color on the ground at a point, or null when it's still white.
+function groundPaintAt(x, y, z) {
+  const f = floorFaceAt(x, y, z);
+  if (!f) return null;
+  const px = Math.min(f.canvas.width - 1, Math.max(0, (x - f.umin) * f.sx | 0));
+  const py = Math.min(f.canvas.height - 1, Math.max(0, (f.vmax - z) * f.sy | 0));
+  const [r, g, b] = f.ctx.getImageData(px, py, 1, 1).data;
+  return r > 238 && g > 238 && b > 238 ? null : [r, g, b];
 }
 
 function flushPaint() {
   for (const f of faces) {
-    if (f.dirty) { f.tex.needsUpdate = true; f.dirty = false; }
+    if (f.dirty) { f.tex.needsUpdate = true; f.mtex.needsUpdate = true; f.dirty = false; }
   }
+}
+
+// ---------------------------------------------------------------- Footprints
+// Walking through paint loads your shoes with that color; the next steps leave
+// fading prints behind, which also gives away where invisible players went.
+
+const STRIDE = 0.75;          // meters between prints
+const PRINTS_PER_DIP = 8;     // prints until the paint on your shoes is used up
+const PRINT_LIFE = 15;        // seconds a print stays
+const PRINT_FADE = 4;         // seconds of fading out at the end
+const MAX_PRINTS = 400;
+
+const footTexture = (() => {
+  const c = document.createElement('canvas');
+  c.width = 64; c.height = 128;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.ellipse(34, 44, 20, 32, 0.08, 0, TAU);   // ball of the foot
+  ctx.ellipse(30, 100, 14, 19, 0, 0, TAU);     // heel
+  ctx.fill();
+  ctx.fillRect(22, 60, 22, 36);                 // arch
+  for (const [x, y, r] of [[16, 10, 6], [27, 5, 6], [38, 5, 5.5], [48, 9, 5], [55, 17, 4.5]]) {
+    ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); // toes
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+})();
+const footGeo = new THREE.PlaneGeometry(0.17, 0.34); // a bit larger than life so trails read from afar
+const footprints = [];
+
+function makeWalker() {
+  return { dist: 0, side: 1, paint: null, left: 0 };
+}
+
+// Called every frame for each walker with its feet position and horizontal velocity.
+function trackSteps(w, pos, vx, vz, dt) {
+  const speed = Math.hypot(vx, vz);
+  if (speed < 0.5) return;
+  w.dist += speed * dt;
+  if (w.dist < STRIDE) return;
+  w.dist = 0;
+  w.side = -w.side;
+  const heading = Math.atan2(-vx, -vz);
+  // feet sit a little to the left and right of the walking line
+  const ox = Math.cos(heading) * 0.13 * w.side, oz = -Math.sin(heading) * 0.13 * w.side;
+  const x = pos.x + ox, z = pos.z + oz;
+  const under = groundPaintAt(x, pos.y, z);
+  if (under) { w.paint = under; w.left = PRINTS_PER_DIP; }
+  if (w.left <= 0 || !w.paint) return;
+  addFootprint(x, pos.y, z, heading, w.side, w.paint, w.left / PRINTS_PER_DIP);
+  w.left--;
+}
+
+function addFootprint(x, y, z, heading, side, rgb, strength) {
+  const mat = new THREE.MeshBasicMaterial({
+    map: footTexture, transparent: true, depthWrite: false,
+    polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+  });
+  mat.color.setRGB(rgb[0] / 255, rgb[1] / 255, rgb[2] / 255, THREE.SRGBColorSpace);
+  const mesh = new THREE.Mesh(footGeo, mat);
+  mesh.rotation.order = 'YXZ';
+  mesh.rotation.set(-Math.PI / 2, heading, 0);
+  mesh.scale.x = side; // mirrored for the other foot
+  mesh.position.set(x, y + 0.004, z);
+  scene.add(mesh);
+  const opacity = 0.45 + 0.55 * strength;
+  mat.opacity = opacity;
+  footprints.push({ mesh, opacity, age: 0 });
+  while (footprints.length > MAX_PRINTS) removeFootprint(0);
+}
+
+function removeFootprint(i) {
+  const fp = footprints[i];
+  scene.remove(fp.mesh);
+  fp.mesh.material.dispose();
+  footprints.splice(i, 1);
+}
+
+function updateFootprints(dt) {
+  for (let i = footprints.length - 1; i >= 0; i--) {
+    const fp = footprints[i];
+    fp.age += dt;
+    if (fp.age >= PRINT_LIFE) { removeFootprint(i); continue; }
+    fp.mesh.material.opacity = fp.opacity * Math.min(1, (PRINT_LIFE - fp.age) / PRINT_FADE);
+  }
+}
+
+function clearFootprints() {
+  while (footprints.length) removeFootprint(footprints.length - 1);
 }
 
 // ---------------------------------------------------------------- Materials & shared geometry
@@ -166,9 +508,10 @@ const whiteMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
 // ?debug renders players in visible colors so they can be seen while developing.
 const DEBUG = new URLSearchParams(location.search).has('debug');
 const avatarMat = DEBUG ? new THREE.MeshNormalMaterial() : whiteMat;
+// Hooks for testing from the browser console with ?debug.
+if (DEBUG) window.splatter = { get me() { return me; }, avatars: () => avatars, paintSplat: sp => paintSplat(sp), trackSteps, makeWalker, flows: () => paintFlow.flows, updateFlows: dt => paintFlow.update(dt, bakeFlow), updateFootprints, fluid: () => fluid, spawnProjectile: (...a) => spawnProjectile(...a), viewer: () => viewer };
 const colorMats = PALETTE.map(hex => new THREE.MeshBasicMaterial({ color: hex }));
 const dotGeo = new THREE.SphereGeometry(1, 10, 8);
-const blobGeo = new THREE.SphereGeometry(C.BLOB_RADIUS * 1.3, 14, 10);
 
 // ---------------------------------------------------------------- Viewmodel (your paint gun)
 
@@ -212,6 +555,7 @@ const me = {
   yaw: 0, pitch: 0, hp: C.MAX_HP, alive: false,
   killedBy: null, respawnAt: 0, stepDist: 0,
 };
+const myWalker = makeWalker();
 const roster = new Map();      // id -> { id, name, color, kills, deaths }
 const avatars = new Map();     // remote id -> avatar
 const projectiles = new Map(); // key -> { mesh, p, v, born, offset }
@@ -263,6 +607,7 @@ function clearMatch() {
   avatars.clear();
   roster.clear();
   for (const key of [...projectiles.keys()]) removeProjectile(key);
+  fluid.clear();
 }
 
 // ---------------------------------------------------------------- Avatars
@@ -271,7 +616,7 @@ function makeAvatar() {
   const ch = createCharacter({ bodyMat: avatarMat, gunShellMat: avatarMat, gunDarkMat: avatarMat });
   scene.add(ch.root);
   return {
-    ch, group: ch.root, dead: false, dots: [], stepDist: 0,
+    ch, group: ch.root, dead: false, dots: [], stepDist: 0, walker: makeWalker(),
     target: new THREE.Vector3(), yaw: 0, targetYaw: 0, pitch: 0, targetPitch: 0,
     vel: new THREE.Vector3(),
   };
@@ -293,11 +638,19 @@ function updateAvatar(av, dt, k) {
     av.vel.lerp(_vel, 1 - Math.exp(-10 * dt));
   }
 
+  // limp body: the ragdoll moves the bones instead of the animations
+  if (av.dead && av.ragdoll?.active) {
+    av.ragdoll.step(dt);
+    av.ragdoll.apply();
+    return;
+  }
+
   let twist = 0;
   if (!av.dead) {
     const airborne = pos.y - groundHeight(pos.x, pos.z, pos.y + 0.3) > 0.3;
     twist = locomotion(av.ch, av.vel, av.yaw, airborne);
     const speed = Math.hypot(av.vel.x, av.vel.z);
+    if (!airborne) trackSteps(av.walker, pos, av.vel.x, av.vel.z, dt);
     if (!airborne && speed > 1) {
       av.stepDist += speed * dt;
       if (av.stepDist > STEP_LENGTH) {
@@ -364,14 +717,26 @@ function clearAvatarPaint(av) {
   av.dots.length = 0;
 }
 
+// Splatted players go limp: a ragdoll starts from the current pose and gets pushed
+// where the last shot hit them (see js/ragdoll.js).
 function killAvatar(av) {
   av.dead = true;
-  setAnim(av.ch, 'death', 0.15);
+  av.ragdoll ||= createRagdoll(av.ch);
+  av.ragdoll.start(av.vel);
+  const h = av.lastHit;
+  if (h && performance.now() - h.time < 1000) {
+    av.ragdoll.hit(h.point, h.dir, 8);
+  } else {
+    const a = Math.random() * Math.PI * 2;
+    av.ragdoll.hit(av.group.position.clone().setY(av.group.position.y + 1.2), new THREE.Vector3(Math.cos(a), 0.2, Math.sin(a)), 5);
+  }
 }
 
 function reviveAvatar(av, p) {
   clearAvatarPaint(av);
   av.dead = false;
+  av.ragdoll?.stop();
+  av.lastHit = null;
   av.group.position.set(...p);
   av.target.set(...p);
   av.vel.set(0, 0, 0);
@@ -386,19 +751,19 @@ function reviveAvatar(av, p) {
 
 // ---------------------------------------------------------------- Projectiles
 
+// Liquid paint in the air (projectiles and impact splashes), see js/fluid.js.
+const fluid = createFluid(renderer);
+const paintColors = PALETTE.map(hex => new THREE.Color(hex));
+
 function spawnProjectile(key, o, v, color, offset) {
-  const mesh = new THREE.Mesh(blobGeo, colorMats[color] || colorMats[0]);
-  mesh.position.set(...o);
-  scene.add(mesh);
-  projectiles.set(key, { mesh, p: o.slice(), v: v.slice(), born: performance.now(), offset });
+  projectiles.set(key, { color: paintColors[color] || paintColors[0], p: o.slice(), v: v.slice(), born: performance.now(), offset });
 }
 
 function removeProjectile(key) {
-  const pr = projectiles.get(key);
-  if (!pr) return;
-  scene.remove(pr.mesh);
   projectiles.delete(key);
 }
+
+const _head = new THREE.Vector3(), _dir = new THREE.Vector3();
 
 function updateProjectiles(dt) {
   const now = performance.now();
@@ -406,12 +771,17 @@ function updateProjectiles(dt) {
     const { hit } = stepProjectile(pr, dt);
     // The server decides impacts; locally we only hide blobs that hit a wall.
     if (hit || now - pr.born > C.BLOB_LIFETIME * 1000) { removeProjectile(key); continue; }
-    pr.mesh.position.set(...pr.p);
+    _head.set(...pr.p);
     if (pr.offset) {
       // Start the blob at the gun muzzle and blend onto the true aim line.
       const k = Math.max(0, 1 - (now - pr.born) / 120);
-      pr.mesh.position.addScaledVector(pr.offset, k);
+      _head.addScaledVector(pr.offset, k);
     }
+    // A gooey drop with a short tail that merges into it.
+    _dir.set(...pr.v).normalize();
+    fluid.blob(_head.clone(), 0.2, pr.color);
+    fluid.blob(_head.clone().addScaledVector(_dir, -0.13), 0.15, pr.color);
+    fluid.blob(_head.clone().addScaledVector(_dir, -0.25), 0.1, pr.color);
   }
 }
 
@@ -443,17 +813,34 @@ function send(msg) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
 }
 
+// Identifies this browser, so the server keeps one player per browser across tabs
+// and refreshes.
+const clientId = (() => {
+  try {
+    let id = localStorage.getItem('splatter-id');
+    if (!id) {
+      id = crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2) + Date.now();
+      localStorage.setItem('splatter-id', id);
+    }
+    return id;
+  } catch {
+    return null;
+  }
+})();
+let closeMessage = '';
+
 function connect(name, color) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   leaving = false;
+  closeMessage = '';
   ws = new WebSocket(`${proto}://${location.host}`);
-  ws.onopen = () => send({ t: 'join', name, color });
+  ws.onopen = () => send({ t: 'join', name, color, cid: clientId });
   ws.onmessage = e => handle(JSON.parse(e.data));
   ws.onclose = () => {
     clearMatch();
     showScreen('menu');
     $('play').disabled = false;
-    $('menuError').textContent = leaving ? '' : 'Disconnected from server.';
+    $('menuError').textContent = closeMessage || (leaving ? '' : 'Disconnected from server.');
   };
   ws.onerror = () => { $('menuError').textContent = 'Could not reach the server.'; };
 }
@@ -462,12 +849,17 @@ function leave() {
   leaving = true;
   if (ws) ws.close();
 }
+// Close the connection right away when the page goes (refresh, tab closed), so the
+// player leaves the lobby immediately instead of lingering.
+window.addEventListener('pagehide', () => { if (ws) { leaving = true; ws.close(); } });
 
 function enterGame(m) {
   clearMatch();
   for (const p of m.players) addRoster(p);
   clearPaint();
-  for (const sp of m.splats) paintSplat(sp);
+  // Replaying a running match: the newest wall splats get their drips, older ones
+  // are drawn without the simulation to keep joining fast.
+  m.splats.forEach((sp, i) => paintSplat(sp, i >= m.splats.length - 60 ? 'instant' : 'static'));
   setRound(m.round);
   me.alive = false;
   me.killedBy = null;
@@ -476,13 +868,25 @@ function enterGame(m) {
   $('roundEnd').hidden = true;
   renderBoard();
   if (m.round.state === 'loading') {
-    // Tell the server once the level is on screen.
-    requestAnimationFrame(() => requestAnimationFrame(() => send({ t: 'ready' })));
+    // Tell the server once the level is on screen. Background tabs don't render
+    // frames, so fall back to a timer.
+    let sent = false;
+    const ready = () => { if (!sent) { sent = true; send({ t: 'ready' }); } };
+    requestAnimationFrame(() => requestAnimationFrame(ready));
+    setTimeout(ready, 1000);
   }
 }
 
 function handle(m) {
   switch (m.t) {
+    case 'kicked':
+      closeMessage = 'You joined from another tab or window.';
+      leaving = true;
+      break;
+    case 'full':
+      closeMessage = `This game is full (${m.max} players).`;
+      leaving = true;
+      break;
     case 'welcome':
       me.id = m.id;
       me.life = m.life;
@@ -530,11 +934,17 @@ function handle(m) {
       spawnProjectile(m.id, m.o, m.v, m.c, null);
       sfx.shootAt(m.o);
       break;
-    case 'splat':
+    case 'splat': {
       removeProjectile(m.id);
       paintSplat(m);
       sfx.splat(m.p);
+      const n = [0, 0, 0];
+      n[m.a] = m.sg;
+      // kills leave a big splat, and a bigger burst
+      const big = m.id === 0;
+      fluid.splash(m.p, n, paintColors[m.c], big ? { count: 28, speed: 4.2, size: 0.12, life: 0.8 } : {});
       break;
+    }
     case 'hitp': {
       removeProjectile(m.id);
       const hitAv = avatars.get(m.target);
@@ -547,6 +957,10 @@ function handle(m) {
       } else if (hitAv) {
         paintAvatar(hitAv, m.off, m.c, m.s);
         sfx.splat(hitAv.group.position.toArray());
+        const at = hitAv.group.position.clone().add(new THREE.Vector3(...m.off));
+        if (m.dir) hitAv.lastHit = { point: at.clone(), dir: new THREE.Vector3(...m.dir), time: performance.now() };
+        const out = [m.off[0], 0.3, m.off[2]];
+        fluid.splash(at.toArray(), out, paintColors[m.c], { count: 10, speed: 2.6, size: 0.08, life: 0.5 });
       }
       if (m.owner === me.id) { hitMarker(false); sfx.hit(); }
       break;
@@ -635,14 +1049,43 @@ function renderLobby() {
       : `${n} player${n === 1 ? '' : 's'} here. Waiting for ${leaderName} to start the match.`;
   }
   $('startMatch').hidden = !isLeader;
+
+  // Bot settings: the leader edits them, everyone else sees them.
+  const st = lobbyState.settings || { bots: false, botCount: 0, maxPlayers: 10 };
+  const bots = st.bots ? Math.max(0, Math.min(st.botCount, st.maxPlayers - n)) : 0;
+  document.querySelector('.bot-settings').classList.toggle('readonly', !isLeader);
+  $('botsEnabled').checked = st.bots;
+  $('botsEnabled').disabled = !isLeader;
+  $('botCount').textContent = st.botCount;
+  $('botsMinus').disabled = !isLeader || !st.bots || st.botCount <= 1;
+  $('botsPlus').disabled = !isLeader || !st.bots || st.botCount >= st.maxPlayers - 1;
+  $('botSummary').textContent = st.bots
+    ? `${n} player${n === 1 ? '' : 's'} + ${bots} bot${bots === 1 ? '' : 's'} = ${n + bots} of ${st.maxPlayers}` +
+      (bots < st.botCount ? ' (bots make room for players)' : '')
+    : `${n} player${n === 1 ? '' : 's'}, bots are off (max ${st.maxPlayers})`;
   lobby.setPlayers(players, leader, me.id);
 }
+
+function sendSettings(change) {
+  const st = lobbyState.settings;
+  if (!st) return;
+  // apply right away so quick repeated clicks add up; the server confirms
+  Object.assign(st, change);
+  st.botCount = Math.min(st.maxPlayers - 1, Math.max(1, st.botCount));
+  send({ t: 'settings', bots: st.bots, botCount: st.botCount });
+  renderLobby();
+}
+$('botsEnabled').addEventListener('change', e => sendSettings({ bots: e.target.checked }));
+$('botsMinus').addEventListener('click', () => sendSettings({ botCount: lobbyState.settings.botCount - 1 }));
+$('botsPlus').addEventListener('click', () => sendSettings({ botCount: lobbyState.settings.botCount + 1 }));
 
 $('startMatch').addEventListener('click', () => {
   initAudio();
   lockPointer();
   send({ t: 'start' });
 });
+// The animation viewer is a development tool: only offered with ?debug.
+$('openViewer').hidden = !DEBUG;
 $('openViewer').addEventListener('click', () => showScreen('viewer'));
 $('closeViewer').addEventListener('click', () => showScreen('lobby'));
 $('leaveLobby').addEventListener('click', leave);
@@ -925,6 +1368,7 @@ function gameFrame(now, dt) {
       if (me.stepDist > STEP_LENGTH) { me.stepDist = 0; play('footstep', { vol: 0.35, jitter: 0.12 }); }
     }
     if (me.onGround && !wasOnGround) play('footstep', { vol: 0.5, jitter: 0.05 });
+    if (me.onGround) trackSteps(myWalker, { x: me.p[0], y: me.p[1], z: me.p[2] }, me.v[0], me.v[2], dt);
     wasOnGround = me.onGround;
 
     if (firing && round.state === 'playing' && now - lastShot >= C.FIRE_INTERVAL * 1000) {
@@ -957,9 +1401,12 @@ function gameFrame(now, dt) {
   for (const av of avatars.values()) updateAvatar(av, dt, k);
 
   updateProjectiles(dt);
+  paintFlow.update(dt, bakeFlow);
+  updateFootprints(dt);
   updateHud(now, dt);
   flushPaint();
-  renderer.render(scene, camera);
+  fluid.update(dt);
+  fluid.render(scene, camera);
 }
 
 renderer.setAnimationLoop(() => {

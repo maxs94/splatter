@@ -8,6 +8,23 @@ Free for all: 4 hits splat a player, they respawn after 3 seconds, and whoever h
 most kills after 5 minutes wins. Health regenerates after a few seconds without being hit;
 the screen edges turn red while you are hurt.
 
+Paint looks wet: splats on walls and floors are rendered the same way, lit from the
+paint's thickness with a glossy highlight. Paint in the air (shots in flight and the
+droplets every impact throws off) is rendered as screen space metaballs
+(`public/js/fluid.js`), the technique from Mix and Jam's
+[Splatoon ink recreation](https://github.com/mixandjam/Splatoon-Ink): droplets add up
+their density in an offscreen buffer, so nearby drops merge into gooey liquid, which a
+final pass thresholds and shades. Paint on walls
+runs down: a GPU simulation (`public/js/paintflow.js`) treats every
+fresh wall splat as a thin film of paint at about 1 cm resolution. The blob sags, paint
+breaks out onto the dry wall at a few spots and runs down in drips, and drips that reach
+the floor leave small puddles. Thick paint runs, thin films barely move, so drips end in
+rounded tips. Paint edges are drawn from a coverage mask with a shader, so they stay smooth
+up close. Walking
+through paint on the ground loads your shoes with it, and the next steps leave colored
+footprints that fade after a while. That also works for invisible players, so their trail
+gives them away.
+
 ## Match flow
 
 1. Pick a name and a paint color, then **Join lobby**.
@@ -19,7 +36,7 @@ the screen edges turn red while you are hurt.
 4. After the round the results show for 10 seconds, then everyone returns to the lobby.
    Players who join while a match runs drop straight into it.
 
-The **Animation viewer** button in the lobby opens a debug scene with the player model
+With `?debug` in the URL, the **Animation viewer** button in the lobby opens a debug scene with the player model
 looping every animation and the in-game combinations (gun pose, strafing, aiming).
 
 ## Run
@@ -41,9 +58,11 @@ docker run --rm -it -p 3000:3000 -v "$PWD":/app -w /app node:22-alpine node serv
 
 ## Bots
 
-While at least one human is connected, bots fill the arena up to `BOTS` players (default 4)
-and leave again as more humans join. Set `BOTS=0` to disable them, and `BOT_SKILL`
-(0 to 1, default 0.4) to make them weaker or stronger. Both are in `docker-compose.yml`.
+A match holds up to 10 players. The lobby leader decides whether bots join and how many
+(1 to 9). Bots never push the total over 10: a player who joins a full match takes a bot's
+place, and the bot comes back when that player leaves. `BOTS` in `docker-compose.yml` sets
+the default bot count of a new lobby, `BOT_SKILL` (0 to 1, default 0.4) makes them weaker
+or stronger.
 
 Bots follow the same visibility rules as you do:
 
@@ -105,7 +124,6 @@ The animations are motion capture from the CMU Graphics Lab Motion Capture Datab
 | idle | 82_08 (stand still) | 99 to 163 |
 | run | 35_17 (run/jog) | 14 to 37 |
 | jump | 13_39 (jump) | 37 to 69 |
-| death | 90_16 (fall on face) | 70 to 130 |
 | aim | posed with IK in Blender | two-handed gun hold |
 
 Silly lobby loops (each player in the lobby loops one of them, the animation viewer shows all):
@@ -122,6 +140,10 @@ Silly lobby loops (each player in the lobby loops one of them, the animation vie
 | fun_lambada | 55_02 (lambada dance) | 3 to 48 |
 | fun_jumpingjacks | 22_16 (synchronized jumping jacks) | 3 to 70 |
 | fun_dancingbear | 55_12 (dancing bear) | 345 to 406 |
+
+A splatted player goes limp as a ragdoll (`public/js/ragdoll.js`): a Verlet particle
+skeleton that falls under gravity, collides with the level and gets pushed where the fatal
+shot hit; the bones of the model follow it.
 
 In game the legs and torso play the mocap while the arms are held in the aim pose, the legs
 turn towards the direction of travel and the spine turns and bends towards where the

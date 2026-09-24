@@ -71,7 +71,7 @@ export function createCharacter({ bodyMat, gunShellMat = null, gunDarkMat = null
   for (const clip of assets.player.animations) {
     if (clip.name === 'aim') continue;
     const a = mixer.clipAction(clip);
-    if (clip.name === 'jump' || clip.name === 'death') {
+    if (clip.name === 'jump') {
       a.setLoop(THREE.LoopOnce, 1);
       a.clampWhenFinished = true;
     }

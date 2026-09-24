@@ -12,7 +12,10 @@ import { Bot, BOT_NAMES } from './bots/brain.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
 // Bots fill the arena up to this many players while at least one human is connected.
-const BOT_FILL = Math.max(0, Number(process.env.BOTS ?? 4));
+// A match holds at most this many players, humans and bots together.
+const MAX_PLAYERS = 10;
+// Default number of bots for a new lobby; the lobby leader can change it.
+const DEFAULT_BOTS = Math.min(MAX_PLAYERS - 1, Math.max(0, Number(process.env.BOTS ?? 3)));
 // Bot skill 0..1, each bot gets a bit of random variation around it.
 const BOT_SKILL = Math.min(1, Math.max(0, Number(process.env.BOT_SKILL ?? 0.4)));
 
@@ -69,6 +72,8 @@ let nextPlayerId = 1;
 let nextProjectileId = 1;
 // Match flow: lobby -> loading (clients load the level) -> countdown -> playing -> ended -> lobby
 const game = { phase: 'lobby', until: 0 };
+// Lobby settings chosen by the leader.
+const settings = { bots: DEFAULT_BOTS > 0, botCount: Math.max(1, DEFAULT_BOTS) };
 const inMatch = () => game.phase !== 'lobby';
 
 const r3 = x => Math.round(x * 1000) / 1000;
@@ -102,6 +107,7 @@ function lobbyInfo() {
   return {
     t: 'lobby', phase: game.phase, leader: leaderId(),
     players: humans().map(p => ({ id: p.id, name: p.name, color: p.color })),
+    settings: { ...settings, maxPlayers: MAX_PLAYERS },
   };
 }
 
@@ -249,7 +255,9 @@ function maintainBots() {
   const humans = humanCount();
   const bots = [...players.values()].filter(p => p.bot);
   const active = game.phase === 'countdown' || game.phase === 'playing' || game.phase === 'ended';
-  const want = humans > 0 && active ? Math.max(0, BOT_FILL - humans) : 0;
+  // The leader's bot count, capped so humans and bots never exceed MAX_PLAYERS:
+  // a human joining a full match takes a bot's place.
+  const want = humans > 0 && active && settings.bots ? Math.max(0, Math.min(settings.botCount, MAX_PLAYERS - humans)) : 0;
   for (let i = bots.length; i < want; i++) addBot();
   for (let i = want; i < bots.length; i++) removeBot(bots[i]);
 }
@@ -258,8 +266,23 @@ function maintainBots() {
 
 const wss = new WebSocketServer({ server, maxPayload: 16 * 1024 });
 
+// Removes a human player and tells everybody.
+function removeHuman(pl) {
+  if (players.get(pl.id) !== pl) return; // already gone
+  players.delete(pl.id);
+  broadcast({ t: 'leave', id: pl.id });
+  console.log(`- ${pl.name} (#${pl.id}) left, ${humanCount()} humans online`);
+  if (humanCount() === 0) returnToLobby();
+  else {
+    maintainBots();
+    broadcast(lobbyInfo());
+  }
+}
+
 wss.on('connection', ws => {
   let me = null;
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
 
   ws.on('message', raw => {
     let m;
@@ -267,11 +290,28 @@ wss.on('connection', ws => {
     if (!m || typeof m !== 'object') return;
 
     if (m.t === 'join' && !me) {
+      // One player per browser: a join with a known client id replaces the older
+      // connection (another tab, or a refresh the server hasn't noticed yet).
+      const cid = typeof m.cid === 'string' ? m.cid.slice(0, 64) : null;
+      if (cid) {
+        for (const other of [...players.values()]) {
+          if (other.bot || other.cid !== cid) continue;
+          send(other.ws, { t: 'kicked', reason: 'tab' });
+          removeHuman(other);
+          other.ws.close(4001, 'replaced');
+        }
+      }
+      if (humanCount() >= MAX_PLAYERS) {
+        send(ws, { t: 'full', max: MAX_PLAYERS });
+        ws.close(4002, 'full');
+        return;
+      }
       const id = nextPlayerId++;
       const name = String(m.name ?? '').replace(/[^\p{L}\p{N} _\-.!?]/gu, '').trim().slice(0, 16) || `Player${id}`;
       const color = Number.isInteger(m.color) && m.color >= 0 && m.color < PALETTE.length
         ? m.color : Math.floor(Math.random() * PALETTE.length);
       me = makePlayer(id, ws, name, color);
+      me.cid = cid;
       players.set(id, me);
       if (inMatch()) {
         // Drop in to the running match.
@@ -290,6 +330,11 @@ wss.on('connection', ws => {
 
     if (m.t === 'start') {
       if (game.phase === 'lobby' && me.id === leaderId()) startMatch();
+    } else if (m.t === 'settings') {
+      if (game.phase !== 'lobby' || me.id !== leaderId()) return;
+      if (typeof m.bots === 'boolean') settings.bots = m.bots;
+      if (Number.isInteger(m.botCount)) settings.botCount = Math.min(MAX_PLAYERS - 1, Math.max(1, m.botCount));
+      broadcast(lobbyInfo());
     } else if (m.t === 'ready') {
       me.ready = true;
     } else if (m.t === 's') {
@@ -317,17 +362,19 @@ wss.on('connection', ws => {
   });
 
   ws.on('close', () => {
-    if (!me) return;
-    players.delete(me.id);
-    broadcast({ t: 'leave', id: me.id });
-    console.log(`- ${me.name} (#${me.id}) left, ${humanCount()} humans online`);
-    if (humanCount() === 0) returnToLobby();
-    else {
-      maintainBots();
-      broadcast(lobbyInfo());
-    }
+    if (me) removeHuman(me);
   });
 });
+
+// Drop connections that stopped answering (closed laptop, killed tab, lost network),
+// so no ghost players stay in the lobby.
+setInterval(() => {
+  for (const ws of wss.clients) {
+    if (!ws.isAlive) { ws.terminate(); continue; }
+    ws.isAlive = false;
+    ws.ping();
+  }
+}, 5000);
 
 // ---------------------------------------------------------------- Simulation
 
@@ -368,6 +415,7 @@ function simulate() {
         t: 'hitp', id: pr.id, owner: pr.owner, target: target.id, c: pr.color, s: seed(),
         off: [r3(q[0] - target.p[0]), r3(q[1] - target.p[1]), r3(q[2] - target.p[2])],
         yaw: r3(target.yaw), hp: Math.max(0, target.hp),
+        dir: pr.v.map(x => r3(x / C.BLOB_SPEED)), // for the ragdoll push
       });
       if (target.hp <= 0) kill(target, pr.owner);
     } else if (hit) {

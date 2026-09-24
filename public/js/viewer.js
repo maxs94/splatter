@@ -4,19 +4,31 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { createCharacter, poseCharacter, setAnim, funClipNames, headPosition, placeLabel } from './characters.js';
+import { createRagdoll } from './ragdoll.js';
 
 const ENTRIES = [
   { label: 'idle', clip: 'idle' },
   { label: 'run', clip: 'run' },
   { label: 'run backwards', clip: 'run', speed: -1 },
   { label: 'jump', clip: 'jump', loop: true },
-  { label: 'death', clip: 'death', loop: true },
   { label: 'idle + gun', clip: 'idle', gun: true },
   { label: 'run + gun', clip: 'run', gun: true, speed: 1.9 },
   { label: 'strafe left + gun', clip: 'run', gun: true, speed: 1.9, twist: 1.2 },
   { label: 'strafe right + gun', clip: 'run', gun: true, speed: 1.9, twist: -1.2 },
   { label: 'aim up/down + gun', clip: 'idle', gun: true, pitchWave: true },
 ];
+
+// Ragdoll deaths: every few seconds the dummy stands up and gets shot again.
+// dir is the direction the paint ball travels, height where it hits.
+const RAGDOLLS = [
+  { label: 'ragdoll: chest, from the front', dir: [0, 0.05, -1], height: 1.25 },
+  { label: 'ragdoll: head, from the side', dir: [1, 0.1, 0], height: 1.6 },
+  { label: 'ragdoll: back, while running', dir: [0, 0.1, 1], height: 1.1, run: true },
+  { label: 'ragdoll: legs, from the front', dir: [0, 0, -1], height: 0.45 },
+  { label: 'ragdoll: from above', dir: [0.3, -1, -0.3], height: 1.7 },
+];
+const RAGDOLL_CYCLE = 4.5;
+const VIEWER_FLOOR = [{ min: [-60, -1, -60], max: [60, 0, 60] }];
 
 // Readable names for the silly lobby loops (CMU clip in brackets).
 const LOBBY_LABELS = {
@@ -88,6 +100,8 @@ export function createViewer(renderer, labelsEl) {
     const entries = [
       ...ENTRIES,
       ...funClipNames().map(clip => ({ label: `lobby: ${LOBBY_LABELS[clip] || clip.slice(4)}`, clip })),
+      // ragdolls last, so they end up in the front row
+      ...RAGDOLLS.map(r => ({ ...r, clip: r.run ? 'run' : 'idle', gun: true, ragdoll: r })),
     ];
     const rows = Math.ceil(entries.length / 5);
     items = entries.map((def, i) => {
@@ -109,7 +123,8 @@ export function createViewer(renderer, labelsEl) {
       label.className = 'name-label viewer-label';
       label.textContent = def.label;
       labelsEl.appendChild(label);
-      return { def, ch, label };
+      const rd = def.ragdoll ? createRagdoll(ch, VIEWER_FLOOR) : null;
+      return { def, ch, label, rd, t: 0, home: ch.root.position.clone() };
     });
   }
 
@@ -125,13 +140,38 @@ export function createViewer(renderer, labelsEl) {
     }
     t += dt;
     controls.update();
-    for (const { def, ch, label } of items) {
-      poseCharacter(ch, dt, {
-        twist: def.twist || 0,
-        pitch: def.pitchWave ? Math.sin(t * 1.5) * 0.8 : 0,
-        upperBody: !def.clip.startsWith('fun_'),
-      });
-      headPosition(ch, _head).y += 0.42;
+    for (const it of items) {
+      const { def, ch, label, rd } = it;
+      if (rd) {
+        it.t += dt;
+        if (it.t > RAGDOLL_CYCLE) {
+          // stand up again and play the pose for a moment
+          it.t = 0;
+          rd.stop();
+          ch.root.position.copy(it.home);
+          const a = ch.actions[def.clip];
+          a.reset().play();
+        }
+        if (!rd.active && it.t > 0.8) {
+          ch.root.updateMatrixWorld(true);
+          rd.start(new THREE.Vector3(0, 0, def.run ? 3.5 : 0));
+          const r = def.ragdoll;
+          rd.hit(it.home.clone().setY(r.height), new THREE.Vector3(...r.dir), 8);
+        }
+      }
+      if (rd && rd.active) {
+        rd.step(dt);
+        rd.apply();
+      } else {
+        poseCharacter(ch, dt, {
+          twist: def.twist || 0,
+          pitch: def.pitchWave ? Math.sin(t * 1.5) * 0.8 : 0,
+          upperBody: !def.clip.startsWith('fun_'),
+        });
+      }
+      // ragdoll labels stay where the dummy stands, so they don't cover it lying down
+      if (rd) _head.copy(it.home).setY(2.3);
+      else headPosition(ch, _head).y += 0.42;
       placeLabel(label, _head, camera, w, h);
     }
     renderer.render(scene, camera);
