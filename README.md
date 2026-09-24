@@ -128,9 +128,14 @@ matched with the other.
 - `shared/game.js` holds the config, the level (axis-aligned boxes), the player movement and
   the projectile physics. Server and browser both import it.
 - `public/client.js` renders with Three.js. Every visible box face is a quad with its own
-  canvas texture that starts white. Splats are painted onto the textures of every face they
+  paint textures that start white. Splats are painted onto the textures of every face they
   touch, so they wrap over edges. Everything uses unlit materials, so an unpainted surface
   looks exactly like the white background.
+- All paint lives on the GPU: splats are drawn straight into the surfaces' render targets
+  (`public/js/surfaces.js`), and the paint running down walls is simulated for all splats at
+  once in a shared texture, one draw call per step (`public/js/paintflow.js`). Settled paint
+  is baked into the surfaces on the GPU as well; nothing is read back or uploaded per splat.
+  Footprints look up the ground color in a small grid kept on the CPU.
 
 ## Player model and animations
 

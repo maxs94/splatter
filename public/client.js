@@ -5,6 +5,8 @@ import { assetsReady, createCharacter, cloneGun, locomotion, poseCharacter, setA
 import { createLobby } from './js/lobby.js';
 import { createViewer } from './js/viewer.js';
 import { createPaintFlow, SIM_PPM } from './js/paintflow.js';
+import { createBlitter } from './js/blit.js';
+import { createSurfaces } from './js/surfaces.js';
 import { createFluid } from './js/fluid.js';
 import { createRagdoll } from './js/ragdoll.js';
 import { perf } from './js/perf.js';
@@ -42,14 +44,16 @@ window.addEventListener('resize', () => {
 });
 
 // ---------------------------------------------------------------- Paintable level
-// Every visible box face is a quad with its own canvas texture. Unpainted, it is
-// exactly as white as the background, so the level is invisible until painted.
+// Every visible box face is a quad with its own paint textures on the GPU (see
+// js/surfaces.js). Unpainted, it is exactly as white as the background, so the level
+// is invisible until painted.
 
 const PPM = 32; // texture pixels per meter
 // Per-face brightness so painted areas read as 3D: +x, -x, +y, -y, +z, -z
 const SHADE = [0.8, 0.7, 1.0, 0.55, 0.9, 0.78];
 const faces = [];
-const maxAniso = renderer.capabilities.getMaxAnisotropy();
+const blit = createBlitter(renderer);
+const surfaces = createSurfaces(renderer, blit);
 
 // Paint edges come from a separate coverage mask: bilinear filtering of the mask gives
 // smooth curves, and the shader cuts a sharp, anti-aliased edge at 50% coverage, so
@@ -74,6 +78,37 @@ const PAINT_FRAGMENT = `
     #include <colorspace_fragment>
   }`;
 
+// Where the ground is painted and in which color, in cells of 1 / GROUND_PPM meters.
+// The paint itself only lives on the GPU; footprints look up this grid instead.
+const GROUND_PPM = 8;
+
+function makeGroundGrid(f) {
+  const w = Math.max(1, Math.ceil((f.umax - f.umin) * GROUND_PPM));
+  const h = Math.max(1, Math.ceil((f.vmax - f.vmin) * GROUND_PPM));
+  return { f, w, h, set: new Uint8Array(w * h), rgb: new Uint8Array(w * h * 3) };
+}
+
+function groundCell(g, u, v) {
+  const x = Math.min(g.w - 1, Math.max(0, Math.floor((u - g.f.umin) * GROUND_PPM)));
+  const y = Math.min(g.h - 1, Math.max(0, Math.floor((v - g.f.vmin) * GROUND_PPM)));
+  return y * g.w + x;
+}
+
+// Marks the cells within r meters of (u, v) (at least the one containing it).
+function markGround(f, u, v, r, rgb) {
+  const g = f.ground;
+  const set = i => { g.set[i] = 1; g.rgb[i * 3] = rgb[0]; g.rgb[i * 3 + 1] = rgb[1]; g.rgb[i * 3 + 2] = rgb[2]; };
+  set(groundCell(g, u, v));
+  const x0 = Math.max(0, Math.floor((u - r - f.umin) * GROUND_PPM)), x1 = Math.min(g.w - 1, Math.floor((u + r - f.umin) * GROUND_PPM));
+  const y0 = Math.max(0, Math.floor((v - r - f.vmin) * GROUND_PPM)), y1 = Math.min(g.h - 1, Math.floor((v + r - f.vmin) * GROUND_PPM));
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const cu = f.umin + (x + 0.5) / GROUND_PPM, cv = f.vmin + (y + 0.5) / GROUND_PPM;
+      if ((cu - u) ** 2 + (cv - v) ** 2 <= r * r) set(y * g.w + x);
+    }
+  }
+}
+
 for (const b of LEVEL.boxes) {
   for (let axis = 0; axis < 3; axis++) {
     for (const sign of [1, -1]) {
@@ -85,25 +120,15 @@ for (const b of LEVEL.boxes) {
       if (umax - umin < 1e-3 || vmax - vmin < 1e-3) continue;
       const plane = sign > 0 ? b.max[axis] : b.min[axis];
 
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.min(2048, Math.max(4, Math.ceil((umax - umin) * PPM)));
-      canvas.height = Math.min(2048, Math.max(4, Math.ceil((vmax - vmin) * PPM)));
-      // Paint is read back for the drip simulation and footprints, so keep canvases on the CPU.
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      ctx.fillStyle = '#fff';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      const tex = new THREE.CanvasTexture(canvas);
-      tex.colorSpace = THREE.SRGBColorSpace;
-      tex.anisotropy = maxAniso;
-      const maskCanvas = document.createElement('canvas');
-      maskCanvas.width = canvas.width;
-      maskCanvas.height = canvas.height;
-      const mctx = maskCanvas.getContext('2d', { willReadFrequently: true });
-      mctx.fillStyle = '#000';
-      mctx.fillRect(0, 0, canvas.width, canvas.height);
-      const mtex = new THREE.CanvasTexture(maskCanvas);
-      mtex.colorSpace = THREE.NoColorSpace;
-      mtex.anisotropy = maxAniso;
+      const face = {
+        axis, sign, ua, va, plane, umin, umax, vmin, vmax,
+        shade: SHADE[axis * 2 + (sign > 0 ? 0 : 1)], floor: !!b.floor,
+      };
+      surfaces.create(face,
+        Math.min(2048, Math.max(4, Math.ceil((umax - umin) * PPM))),
+        Math.min(2048, Math.max(4, Math.ceil((vmax - vmin) * PPM))));
+      // Upward faces remember where paint is, so footprints can pick it up.
+      if (axis === 1 && sign > 0) face.ground = makeGroundGrid(face);
 
       const pos = [], uv = [];
       for (const [u, v] of [[umin, vmin], [umax, vmin], [umax, vmax], [umin, vmax]]) {
@@ -117,27 +142,19 @@ for (const b of LEVEL.boxes) {
       geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
       geo.setIndex([0, 1, 2, 0, 2, 3]);
       const mesh = new THREE.Mesh(geo, new THREE.ShaderMaterial({
-        uniforms: { map: { value: tex }, mask: { value: mtex } },
+        uniforms: { map: { value: face.surf.color.texture }, mask: { value: face.surf.mask.texture } },
         vertexShader: PAINT_VERTEX, fragmentShader: PAINT_FRAGMENT, side: THREE.DoubleSide,
       }));
       scene.add(mesh);
-
-      faces.push({
-        axis, sign, ua, va, plane, umin, umax, vmin, vmax, canvas, ctx, tex, maskCanvas, mctx, mtex,
-        sx: canvas.width / (umax - umin), sy: canvas.height / (vmax - vmin),
-        shade: SHADE[axis * 2 + (sign > 0 ? 0 : 1)], dirty: false, rect: null, floor: !!b.floor,
-      });
+      faces.push(face);
     }
   }
 }
 
 function clearPaint() {
   for (const f of faces) {
-    f.ctx.fillStyle = '#fff';
-    f.ctx.fillRect(0, 0, f.canvas.width, f.canvas.height);
-    f.mctx.fillStyle = '#000';
-    f.mctx.fillRect(0, 0, f.canvas.width, f.canvas.height);
-    f.dirty = true;
+    surfaces.clear(f);
+    if (f.ground) f.ground.set.fill(0);
   }
   paintFlow.clear();
   clearFootprints();
@@ -161,11 +178,9 @@ function splatShape(r, seed) {
   return { circles, tint: 0.9 + rng() * 0.1, rng };
 }
 
-const rgbStr = (c, k = 1) => `rgb(${Math.min(255, c[0] * k) | 0},${Math.min(255, c[1] * k) | 0},${Math.min(255, c[2] * k) | 0})`;
-const mixWhite = (c, t) => [c[0] + (255 - c[0]) * t, c[1] + (255 - c[1]) * t, c[2] + (255 - c[2]) * t];
-
-// Paint circles into one face in three layers so the paint reads as a thick, wet
-// blob: a darker rim, the body, and glossy highlights towards the upper left.
+// Paint circles into one face (see js/surfaces.js for the look: a darker rim, the body
+// and glossy highlights). mask = false only records the color on the ground, for
+// footprints: the core of a floor splat is drawn by the paint simulation instead.
 function paintCircles(f, sp, circles, base, mask = true) {
   const t1 = (sp.a + 1) % 3, t2 = (sp.a + 2) % 3;
   const c3 = [0, 0, 0];
@@ -175,40 +190,11 @@ function paintCircles(f, sp, circles, base, mask = true) {
     c3[t1] += cx; c3[t2] += cy;
     const dist = Math.abs(c3[f.axis] - f.plane);
     if (dist >= rad) continue;
-    const rr = Math.sqrt(rad * rad - dist * dist) * f.sx;
-    hits.push([(c3[f.ua] - f.umin) * f.sx, (f.vmax - c3[f.va]) * f.sy, rr]);
+    hits.push([c3[f.ua], c3[f.va], Math.sqrt(rad * rad - dist * dist)]);
   }
   if (!hits.length) return false;
-  const layer = (ctx, style, scale, dx, dy, minR = 0, grow = 0) => {
-    ctx.fillStyle = style;
-    ctx.beginPath();
-    for (const [x, y, r] of hits) {
-      if (r < minR) continue;
-      const rr = r * scale + grow;
-      ctx.moveTo(x + dx * r + rr, y + dy * r);
-      ctx.arc(x + dx * r, y + dy * r, rr, 0, TAU);
-    }
-    ctx.fill();
-  };
-  // coverage mask with the exact shape, color slightly larger (see PAINT_FRAGMENT)
-  if (mask) layer(f.mctx, '#fff', 1, 0, 0);
-  const ctx = f.ctx;
-  layer(ctx, rgbStr(base, 0.72), 1, 0, 0, 0, 2);
-  layer(ctx, rgbStr(base), 0.86, -0.04, -0.04);
-  ctx.globalAlpha = 0.28;
-  layer(ctx, rgbStr(mixWhite(base, 0.55)), 0.5, -0.22, -0.26, 3);
-  ctx.globalAlpha = 0.55;
-  layer(ctx, rgbStr(mixWhite(base, 0.85)), 0.16, -0.35, -0.4, 4);
-  ctx.globalAlpha = 1;
-  // bounds of all layers (the rim grows by 2 px) plus antialiasing
-  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  for (const [x, y, r] of hits) {
-    x0 = Math.min(x0, x - r - 4); y0 = Math.min(y0, y - r - 4);
-    x1 = Math.max(x1, x + r + 4); y1 = Math.max(y1, y + r + 4);
-  }
-  x0 = Math.max(0, Math.floor(x0)); y0 = Math.max(0, Math.floor(y0));
-  x1 = Math.min(f.canvas.width, Math.ceil(x1)); y1 = Math.min(f.canvas.height, Math.ceil(y1));
-  if (x1 > x0 && y1 > y0) addDirtyRect(f, x0, y0, x1 - x0, y1 - y0);
+  if (mask) surfaces.splat(f, hits, base);
+  if (f.ground) for (const [u, v, r] of hits) markGround(f, u, v, r, base);
   return true;
 }
 
@@ -255,10 +241,10 @@ function paintSplatInner(sp, mode) {
 
 // ---------------------------------------------------------------- Running paint
 // Paint on walls runs down: see js/paintflow.js for the GPU simulation. Here the core
-// of a wall splat is handed to it, and settled flows are baked back into the wall's
-// paint canvas (bakeInto below redraws them on the CPU with the same lighting).
+// of a wall splat is handed to it; settled flows are eventually baked into the wall's
+// paint, on the GPU as well.
 
-const paintFlow = createPaintFlow(renderer, scene);
+const paintFlow = createPaintFlow(renderer, scene, blit, surfaces, { onBottomRow: addPuddles });
 
 function startFlow(f, sp, core, base, instant) {
   const t1 = (sp.a + 1) % 3;
@@ -273,130 +259,26 @@ function startFlow(f, sp, core, base, instant) {
   const v1 = Math.min(hi.v, pv + (runs ? 1.2 : 1.3) * r);
   const v0 = Math.max(lo.v, runs ? pv - 1.2 * r - 2.6 : pv - 1.3 * r);
   if (u1 - u0 < 0.1 || v1 - v0 < 0.1) { paintCircles(f, sp, core, base); return; }
-  // Floors: also put the color into the canvas (not the edge mask, so it stays
-  // invisible) so footprints pick up fresh paint before it gets baked.
+  // Floors: remember the color on the ground so footprints pick up fresh paint.
   if (!runs) paintCircles(f, sp, core, base, false);
   const color = new THREE.Color().setRGB(base[0] / 255, base[1] / 255, base[2] / 255, THREE.SRGBColorSpace);
-  const fl = paintFlow.add({ face: f, u0, u1, v0, v1, blobs, color, seed: sp.s, instant, flow: runs });
-  fl.base = base;
-  if (instant) {
-    bakeFlow(fl, paintFlow.readThickness(fl));
-    paintFlow.remove(fl);
-  }
+  // A floor splat is baked into every floor tile it covers.
+  const targets = f.floor
+    ? faces.filter(g => g.floor && g.umin < u1 && u0 < g.umax && g.vmin < v1 && v0 < g.vmax)
+    : [f];
+  // Paint that reaches the bottom of a wall leaves puddles (see addPuddles).
+  const bottomRow = runs && v0 <= f.vmin + 1e-3;
+  paintFlow.add({ face: f, u0, u1, v0, v1, blobs, color, base, seed: sp.s, instant, flow: runs, targets, bottomRow });
 }
 
-// Draw a settled flow into the wall canvas (and puddles where it reached the floor).
-function bakeFlow(fl, thick) {
-  const t = perf.begin();
-  perf.count('paint.bakes');
-  bakeFlowInner(fl, thick);
-  perf.end('paint.bake', t);
-}
-
-function bakeFlowInner(fl, thick) {
-  const targets = fl.face.floor
-    ? faces.filter(g => g.floor && g.umin < fl.u1 && fl.u0 < g.umax && g.vmin < fl.v1 && fl.v0 < g.vmax)
-    : [fl.face];
-  for (const g of targets) bakeInto(g, fl, thick);
-  if (!fl.face.floor) addPuddles(fl, thick);
-}
-
-// Bakes a flow into one surface's paint canvas using the same lighting as the GPU
-// shader (paintflow.js), so a splat doesn't visibly change when it gets baked. Slopes
-// come straight from the simulation grid, so splats spanning floor tiles stay seamless.
-const BAKE_LIGHT = (() => { const l = [0.35, 0.8, 0.5], n = Math.hypot(...l); return l.map(x => x / n); })();
-
-function bakeInto(f, fl, thick) {
-  const x0 = Math.max(0, Math.floor((fl.u0 - f.umin) * f.sx));
-  const x1 = Math.min(f.canvas.width, Math.ceil((fl.u1 - f.umin) * f.sx));
-  const y0 = Math.max(0, Math.floor((f.vmax - fl.v1) * f.sy));
-  const y1 = Math.min(f.canvas.height, Math.ceil((f.vmax - fl.v0) * f.sy));
-  const w = x1 - x0, h = y1 - y0;
-  if (w < 1 || h < 1) return;
-  const at = (u, v) => {
-    const sx = Math.min(fl.w - 1.001, Math.max(0, (u - fl.u0) * SIM_PPM - 0.5));
-    const sy = Math.min(fl.h - 1.001, Math.max(0, (v - fl.v0) * SIM_PPM - 0.5));
-    const ix = sx | 0, iy = sy | 0, fx = sx - ix, fy = sy - iy;
-    const i = iy * fl.w + ix;
-    return (thick[i] * (1 - fx) + thick[i + 1] * fx) * (1 - fy) + (thick[i + fl.w] * (1 - fx) + thick[i + fl.w + 1] * fx) * fy;
-  };
-  const d = 2 / SIM_PPM; // same slope distance as the shader
-  const L = BAKE_LIGHT;
-  // world vectors of the face axes and its normal
-  const U = [0, 0, 0], V = [0, 0, 0], N = [0, 0, 0];
-  U[f.ua] = 1; V[f.va] = 1; N[f.axis] = f.sign;
-  // Baked paint is seen from all sides, so the highlight uses the view along the normal.
-  const H = [L[0] + N[0], L[1] + N[1], L[2] + N[2]];
-  const hl = Math.hypot(...H); H[0] /= hl; H[1] /= hl; H[2] /= hl;
-
-  const bgImg = f.ctx.getImageData(x0, y0, w, h), bgMask = f.mctx.getImageData(x0, y0, w, h);
-  const bg = bgImg.data, bgm = bgMask.data;
-  // the shader lights the color in linear space, so do the same here
-  const lin = fl.base.map(c => Math.pow(c / 255, 2.2));
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const o = (y * w + x) * 4;
-      const u = f.umin + (x0 + x + 0.5) / f.sx, v = f.vmax - (y0 + y + 0.5) / f.sy;
-      if (u < fl.u0 || u > fl.u1 || v < fl.v0 || v > fl.v1) continue;
-      // Edge mask as area coverage: texels on the edge are sampled 4x4 and store the
-      // covered fraction, so the edge shader draws a smooth curve, not stair steps.
-      const du = 0.5 / f.sx, dv = 0.5 / f.sy, TH = 0.045;
-      const c00 = at(u - du, v - dv) > TH, c10 = at(u + du, v - dv) > TH;
-      const c01 = at(u - du, v + dv) > TH, c11 = at(u + du, v + dv) > TH;
-      let cover;
-      if (c00 && c10 && c01 && c11) cover = 1;
-      else if (!c00 && !c10 && !c01 && !c11) cover = 0;
-      else {
-        let n = 0;
-        for (let sy = 0; sy < 4; sy++) {
-          for (let sx = 0; sx < 4; sx++) {
-            if (at(u - du + (sx + 0.5) * du / 2, v - dv + (sy + 0.5) * dv / 2) > TH) n++;
-          }
-        }
-        cover = n / 16;
-      }
-      const m = cover * 255;
-      if (m > bgm[o]) bgm[o] = bgm[o + 1] = bgm[o + 2] = m;
-      const t = at(u, v);
-      if (t < 0.01 && cover === 0) continue;
-      const hx = at(u + d, v) - at(u - d, v), hy = at(u, v + d) - at(u, v - d);
-      let nx = -hx * 1.6 * U[0] - hy * 1.6 * V[0] + N[0];
-      let ny = -hx * 1.6 * U[1] - hy * 1.6 * V[1] + N[1];
-      let nz = -hx * 1.6 * U[2] - hy * 1.6 * V[2] + N[2];
-      const nl = Math.hypot(nx, ny, nz); nx /= nl; ny /= nl; nz /= nl;
-      const diff = 0.7 + 0.38 * Math.max(0, nx * L[0] + ny * L[1] + nz * L[2]);
-      // baked highlights can't follow the view, so keep them to a subtle sheen
-      const spec = Math.pow(Math.max(0, nx * H[0] + ny * H[1] + nz * H[2]), 70) * 0.3;
-      const s = Math.min(1, Math.max(0, t / 0.9));
-      const rim = 1 - 0.16 * s * s * (3 - 2 * s);
-      // color reaches a little beyond the mask edge (no light fringe)
-      const a = cover > 0 ? 1 : Math.min(1, (t - 0.01) / 0.02);
-      for (let c = 0; c < 3; c++) {
-        const col = 255 * Math.pow(Math.min(1, lin[c] * diff * rim + spec), 1 / 2.2);
-        bg[o + c] = bg[o + c] * (1 - a) + col * a;
-      }
-    }
-  }
-  f.ctx.putImageData(bgImg, x0, y0);
-  f.mctx.putImageData(bgMask, x0, y0);
-  addDirtyRect(f, x0, y0, w, h);
-}
-
-// Baked splats only touch a small part of a surface, so only that part is uploaded
-// (see uploadRect) instead of the whole canvas and mask.
-function addDirtyRect(f, x0, y0, w, h) {
-  const r = f.rect;
-  if (!r) { f.rect = { x0, y0, x1: x0 + w, y1: y0 + h }; return; }
-  r.x0 = Math.min(r.x0, x0); r.y0 = Math.min(r.y0, y0);
-  r.x1 = Math.max(r.x1, x0 + w); r.y1 = Math.max(r.y1, y0 + h);
-}
-
-// Puddles below drips that reached the bottom of the wall.
-function addPuddles(fl, thick) {
+// Puddles below drips that reached the bottom of the wall. row: thickness along the
+// bottom edge of the flow, in simulation texels.
+function addPuddles(fl, row) {
   const f = fl.face;
-  if (f.axis === 1 || fl.v0 > f.vmin + 1e-3) return;
+  if (fl.v0 > f.vmin + 1e-3) return; // the simulation shortened the region
+  const byFloor = new Map();
   for (let sx = 0; sx < fl.w; sx += 3) {
-    const t = Math.max(thick[sx], thick[sx + 1] || 0, thick[sx + 2] || 0);
+    const t = Math.max(row[sx], row[sx + 1] || 0, row[sx + 2] || 0);
     if (t < 0.08) continue;
     const p = [0, 0, 0];
     p[f.axis] = f.plane + f.sign * 0.08;
@@ -404,18 +286,15 @@ function addPuddles(fl, thick) {
     p[f.va] = f.vmin;
     const floor = floorFaceAt(p[0], p[1], p[2]);
     if (!floor) continue;
-    const px = (p[floor.ua] - floor.umin) * floor.sx, py = (floor.vmax - p[floor.va]) * floor.sy;
-    const r = 2 + t * 4;
-    floor.ctx.fillStyle = rgbStr(fl.base, 0.9);
-    floor.ctx.beginPath();
-    floor.ctx.ellipse(px, py, r * 1.3 + 2, r + 2, 0, 0, TAU);
-    floor.ctx.fill();
-    floor.mctx.fillStyle = '#fff';
-    floor.mctx.beginPath();
-    floor.mctx.ellipse(px, py, r * 1.3, r, 0, 0, TAU);
-    floor.mctx.fill();
-    floor.dirty = true;
+    const r = (2 + t * 4) / PPM; // meters
+    if (!byFloor.has(floor)) byFloor.set(floor, []);
+    byFloor.get(floor).push([p[floor.ua], p[floor.va], r * 1.3, r]);
     sx += 6;
+  }
+  const rgb = fl.base.map(c => c * 0.9);
+  for (const [floor, list] of byFloor) {
+    surfaces.ellipses(floor, list, rgb, 2 / PPM);
+    for (const [u, v, ru, rv] of list) markGround(floor, u, v, (ru + rv) / 2, rgb);
   }
 }
 
@@ -432,57 +311,9 @@ function floorFaceAt(x, y, z) {
 function groundPaintAt(x, y, z) {
   const f = floorFaceAt(x, y, z);
   if (!f) return null;
-  const px = Math.min(f.canvas.width - 1, Math.max(0, (x - f.umin) * f.sx | 0));
-  const py = Math.min(f.canvas.height - 1, Math.max(0, (f.vmax - z) * f.sy | 0));
-  const [r, g, b] = f.ctx.getImageData(px, py, 1, 1).data;
-  return r > 238 && g > 238 && b > 238 ? null : [r, g, b];
-}
-
-function flushPaint() {
-  for (const f of faces) {
-    if (f.dirty) {
-      f.tex.needsUpdate = true;
-      f.mtex.needsUpdate = true;
-      f.dirty = false;
-      f.rect = null;
-      perf.count('paint.textureUploads', 2);
-      perf.count('paint.uploadedPixels', f.canvas.width * f.canvas.height * 2);
-    } else if (f.rect) {
-      uploadRect(f, f.rect);
-      f.rect = null;
-    }
-  }
-}
-
-// Copies a rectangle of a surface's paint canvas and mask into their GPU textures.
-// Falls back to a full upload while a texture hasn't reached the GPU yet.
-function uploadRect(f, { x0, y0, x1, y1 }) {
-  const gl = renderer.getContext();
-  const w = x1 - x0, h = y1 - y0, stride = w * 4;
-  for (const [tex, ctx] of [[f.tex, f.ctx], [f.mtex, f.mctx]]) {
-    const props = renderer.properties.get(tex);
-    if (!props.__webglTexture || props.__version !== tex.version) {
-      tex.needsUpdate = true;
-      perf.count('paint.textureUploads');
-      perf.count('paint.uploadedPixels', f.canvas.width * f.canvas.height);
-      continue;
-    }
-    // Canvas rows run top down, the texture's bottom up (flipY), so flip them here.
-    const src = ctx.getImageData(x0, y0, w, h).data;
-    const rows = new Uint8Array(src.length);
-    for (let y = 0; y < h; y++) rows.set(src.subarray(y * stride, (y + 1) * stride), (h - 1 - y) * stride);
-    renderer.state.bindTexture(gl.TEXTURE_2D, props.__webglTexture);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
-    gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
-    gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0);
-    gl.pixelStorei(gl.UNPACK_SKIP_ROWS, 0);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, x0, f.canvas.height - y1, w, h, gl.RGBA, gl.UNSIGNED_BYTE, rows);
-    gl.generateMipmap(gl.TEXTURE_2D);
-    perf.count('paint.textureUploads');
-    perf.count('paint.uploadedPixels', w * h);
-  }
+  const g = f.ground;
+  const i = groundCell(g, x, z);
+  return g.set[i] ? [g.rgb[i * 3], g.rgb[i * 3 + 1], g.rgb[i * 3 + 2]] : null;
 }
 
 // ---------------------------------------------------------------- Footprints
@@ -583,7 +414,7 @@ const whiteMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
 const DEBUG = new URLSearchParams(location.search).has('debug');
 const avatarMat = DEBUG ? new THREE.MeshNormalMaterial() : whiteMat;
 // Hooks for testing from the browser console with ?debug.
-if (DEBUG) window.splatter = { get me() { return me; }, avatars: () => avatars, paintSplat: sp => paintSplat(sp), trackSteps, makeWalker, flows: () => paintFlow.flows, updateFlows: dt => paintFlow.update(dt, bakeFlow), updateFootprints, fluid: () => fluid, spawnProjectile: (...a) => spawnProjectile(...a), viewer: () => viewer };
+if (DEBUG) window.splatter = { get me() { return me; }, avatars: () => avatars, paintSplat: (sp, mode) => paintSplat(sp, mode), trackSteps, makeWalker, flows: () => paintFlow.flows, updateFlows: dt => paintFlow.update(dt), updateFootprints, fluid: () => fluid, spawnProjectile: (...a) => spawnProjectile(...a), viewer: () => viewer };
 const colorMats = PALETTE.map(hex => new THREE.MeshBasicMaterial({ color: hex }));
 const dotGeo = new THREE.SphereGeometry(1, 10, 8);
 
@@ -1497,10 +1328,10 @@ function gameFrame(now, dt) {
   const k = 1 - Math.exp(-15 * dt);
   timed('avatars', () => { for (const av of avatars.values()) updateAvatar(av, dt, k); });
   timed('projectiles', () => updateProjectiles(dt));
-  timed('paintflow', () => paintFlow.update(dt, bakeFlow));
+  timed('paintflow', () => paintFlow.update(dt));
   timed('footprints', () => updateFootprints(dt));
   timed('hud', () => updateHud(now, dt));
-  timed('flushPaint', flushPaint);
+  timed('flushPaint', () => surfaces.flush());
   timed('fluid.update', () => fluid.update(dt));
   timed('render', () => fluid.render(scene, camera));
   if (perf.enabled) {
