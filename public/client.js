@@ -125,7 +125,7 @@ for (const b of LEVEL.boxes) {
       faces.push({
         axis, sign, ua, va, plane, umin, umax, vmin, vmax, canvas, ctx, tex, maskCanvas, mctx, mtex,
         sx: canvas.width / (umax - umin), sy: canvas.height / (vmax - vmin),
-        shade: SHADE[axis * 2 + (sign > 0 ? 0 : 1)], dirty: false, floor: !!b.floor,
+        shade: SHADE[axis * 2 + (sign > 0 ? 0 : 1)], dirty: false, rect: null, floor: !!b.floor,
       });
     }
   }
@@ -200,7 +200,15 @@ function paintCircles(f, sp, circles, base, mask = true) {
   ctx.globalAlpha = 0.55;
   layer(ctx, rgbStr(mixWhite(base, 0.85)), 0.16, -0.35, -0.4, 4);
   ctx.globalAlpha = 1;
-  f.dirty = true;
+  // bounds of all layers (the rim grows by 2 px) plus antialiasing
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const [x, y, r] of hits) {
+    x0 = Math.min(x0, x - r - 4); y0 = Math.min(y0, y - r - 4);
+    x1 = Math.max(x1, x + r + 4); y1 = Math.max(y1, y + r + 4);
+  }
+  x0 = Math.max(0, Math.floor(x0)); y0 = Math.max(0, Math.floor(y0));
+  x1 = Math.min(f.canvas.width, Math.ceil(x1)); y1 = Math.min(f.canvas.height, Math.ceil(y1));
+  if (x1 > x0 && y1 > y0) addDirtyRect(f, x0, y0, x1 - x0, y1 - y0);
   return true;
 }
 
@@ -371,7 +379,16 @@ function bakeInto(f, fl, thick) {
   }
   f.ctx.putImageData(bgImg, x0, y0);
   f.mctx.putImageData(bgMask, x0, y0);
-  f.dirty = true;
+  addDirtyRect(f, x0, y0, w, h);
+}
+
+// Baked splats only touch a small part of a surface, so only that part is uploaded
+// (see uploadRect) instead of the whole canvas and mask.
+function addDirtyRect(f, x0, y0, w, h) {
+  const r = f.rect;
+  if (!r) { f.rect = { x0, y0, x1: x0 + w, y1: y0 + h }; return; }
+  r.x0 = Math.min(r.x0, x0); r.y0 = Math.min(r.y0, y0);
+  r.x1 = Math.max(r.x1, x0 + w); r.y1 = Math.max(r.y1, y0 + h);
 }
 
 // Puddles below drips that reached the bottom of the wall.
@@ -427,9 +444,44 @@ function flushPaint() {
       f.tex.needsUpdate = true;
       f.mtex.needsUpdate = true;
       f.dirty = false;
+      f.rect = null;
       perf.count('paint.textureUploads', 2);
       perf.count('paint.uploadedPixels', f.canvas.width * f.canvas.height * 2);
+    } else if (f.rect) {
+      uploadRect(f, f.rect);
+      f.rect = null;
     }
+  }
+}
+
+// Copies a rectangle of a surface's paint canvas and mask into their GPU textures.
+// Falls back to a full upload while a texture hasn't reached the GPU yet.
+function uploadRect(f, { x0, y0, x1, y1 }) {
+  const gl = renderer.getContext();
+  const w = x1 - x0, h = y1 - y0, stride = w * 4;
+  for (const [tex, ctx] of [[f.tex, f.ctx], [f.mtex, f.mctx]]) {
+    const props = renderer.properties.get(tex);
+    if (!props.__webglTexture || props.__version !== tex.version) {
+      tex.needsUpdate = true;
+      perf.count('paint.textureUploads');
+      perf.count('paint.uploadedPixels', f.canvas.width * f.canvas.height);
+      continue;
+    }
+    // Canvas rows run top down, the texture's bottom up (flipY), so flip them here.
+    const src = ctx.getImageData(x0, y0, w, h).data;
+    const rows = new Uint8Array(src.length);
+    for (let y = 0; y < h; y++) rows.set(src.subarray(y * stride, (y + 1) * stride), (h - 1 - y) * stride);
+    renderer.state.bindTexture(gl.TEXTURE_2D, props.__webglTexture);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
+    gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0);
+    gl.pixelStorei(gl.UNPACK_SKIP_ROWS, 0);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, x0, f.canvas.height - y1, w, h, gl.RGBA, gl.UNSIGNED_BYTE, rows);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    perf.count('paint.textureUploads');
+    perf.count('paint.uploadedPixels', w * h);
   }
 }
 

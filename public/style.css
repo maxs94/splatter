@@ -250,4 +250,3 @@ label, .label {
 }
 #perfPanel pre { margin: 0 0 6px; font: inherit; white-space: pre; }
 #perfPanel button { font: 700 11px var(--font); padding: 3px 8px; cursor: pointer; }
-#perfPanel a { color: #9fd0ff; margin-left: 8px; }

@@ -3,9 +3,10 @@
 // Measures frame intervals and the work done per frame (split into sections), long
 // tasks, network messages (rate, handling time, and the gaps between the server's
 // position updates, which reveal server or network stalls), paint texture uploads,
-// renderer stats and memory. Shows a small live panel and, at the end of a match,
-// uploads a report to the server (saved in ./profiles when the server runs with
-// PROFILE=1) and offers it as a download.
+// renderer stats and memory. Shows a small live panel. At the end of a match the
+// report is uploaded to the server (saved in ./profiles when the server runs with
+// PROFILE=1) and recording starts over; "Download report" saves everything recorded
+// since then as a text file.
 
 const round = (x, d = 2) => Math.round(x * 10 ** d) / 10 ** d;
 const pct = (sorted, p) => (sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))] : 0);
@@ -16,10 +17,10 @@ class Perf {
     this.enabled = true;
     this.panel = document.createElement('div');
     this.panel.id = 'perfPanel';
-    this.panel.innerHTML = '<pre></pre><div class="perf-buttons"><button type="button">Save report</button></div>';
+    this.panel.innerHTML = '<pre></pre><div class="perf-buttons"><button type="button">Download report</button></div>';
     document.body.appendChild(this.panel);
     this.pre = this.panel.querySelector('pre');
-    this.panel.querySelector('button').addEventListener('click', () => this.finish('saved by hand', true));
+    this.panel.querySelector('button').addEventListener('click', () => this.download());
     this.longTasks = { count: 0, total: 0, max: 0 };
     try {
       new PerformanceObserver(list => {
@@ -238,30 +239,28 @@ class Perf {
     return L.join('\n') + '\n';
   }
 
-  // Ends the recording: uploads the report and offers it as a download.
-  async finish(reason, keepRecording = false) {
+  // Ends the recording (match over): uploads the report and starts over.
+  async finish(reason) {
     if (!this.work.length) return;
     this.sample({});
     const report = this.report(reason);
-    const text = this.text(report);
-    const body = JSON.stringify({ report, text });
-    let saved = false;
+    const body = JSON.stringify({ report, text: this.text(report) });
+    this.reset();
     try {
-      const res = await fetch('/api/client-profile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
-      saved = res.ok;
+      await fetch('/api/client-profile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
     } catch {}
-    const blob = new Blob([text], { type: 'text/plain' });
+  }
+
+  // Saves what was recorded so far as a text file and keeps recording.
+  download() {
+    if (!this.work.length) return;
+    this.sample({});
+    const report = this.report('downloaded');
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `splatter-browser-${report.startedAt.replace(/[:.]/g, '-')}.txt`;
-    a.textContent = 'Download browser report';
-    const box = this.panel.querySelector('.perf-buttons');
-    box.querySelectorAll('a, span').forEach(n => n.remove());
-    box.appendChild(a);
-    const note = document.createElement('span');
-    note.textContent = saved ? ' (also saved on the server)' : '';
-    box.appendChild(note);
-    if (!keepRecording) this.reset();
+    a.href = URL.createObjectURL(new Blob([this.text(report)], { type: 'text/plain' }));
+    a.download = `splatter-browser-${report.endedAt.replace(/[:.]/g, '-')}.txt`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }
 
   // Page is going away: send what we have.

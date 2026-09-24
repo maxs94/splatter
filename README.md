@@ -102,11 +102,12 @@ To profile the browser too, open the game with `?profile` (for example
 `http://localhost:3000/?profile`). A small panel shows FPS, frame times, the work done per
 frame by section, long tasks, the largest gap between the server's position updates
 (they should arrive every 50 ms, so large gaps mean the server or network stalled while
-the browser kept up) and paint, droplet and renderer stats. At the end of a match, or with
-the "Save report" button, the report is uploaded and saved in `./profiles/` as
-`browser-<time>-<name>.txt` next to the server's reports (when the server runs with
-`PROFILE: "1"`), and offered as a download. Both reports use UTC times, so spikes on one
-side can be matched with the other.
+the browser kept up) and paint, droplet and renderer stats. At the end of a match the
+report is uploaded and saved in `./profiles/` as `browser-<time>-<name>.txt` next to the
+server's reports (when the server runs with `PROFILE: "1"`), and recording starts over.
+The "Download report" button saves everything recorded since then (usually the current
+match so far) as a text file. Both reports use UTC times, so spikes on one side can be
+matched with the other.
 
 ## Controls
 

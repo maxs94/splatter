@@ -17,6 +17,7 @@ export const SIM_PPM = 96;       // simulation texels per meter
 const STEP = 1 / 90;             // seconds per simulation step (at most one texel of travel)
 const LIVE_TIME = 6;             // seconds a flow is simulated
 const MAX_OVERLAYS = 150;        // older settled splats get baked into the surface canvas
+const MAX_BAKING = 3;            // bakes waiting for their GPU read at the same time
 
 const QUAD_VERTEX = `
   varying vec2 vUv;
@@ -157,6 +158,7 @@ export function createPaintFlow(renderer, scene) {
 
   const flows = [];
   let order = 0;
+  let baking = 0; // bakes waiting for their asynchronous read
 
   function makeTarget(w, h) {
     return new THREE.WebGLRenderTarget(w, h, {
@@ -273,14 +275,35 @@ export function createPaintFlow(renderer, scene) {
       if (fl.time >= LIVE_TIME) settle(fl);
     }
     // Keep GPU memory bounded: bake the oldest settled splat into the surface canvas.
-    // One per frame, so baking never causes a hitch.
-    if (flows.length > MAX_OVERLAYS) {
-      const fl = flows.find(f => !f.live);
+    // At most one new bake per frame, and the thickness is read back asynchronously:
+    // a synchronous read waits for the GPU to finish all queued work (a hitch of up
+    // to ~80 ms). The flow stays visible until its bake lands in the canvas.
+    if (flows.length - baking > MAX_OVERLAYS && baking < MAX_BAKING) {
+      const fl = flows.find(f => !f.live && !f.baking);
       if (fl) {
-        bake(fl, readThickness(fl));
-        remove(fl);
+        fl.baking = true;
+        baking++;
+        readThicknessAsync(fl).then(thick => {
+          if (!fl.removed) { bake(fl, thick); remove(fl); }
+        }).catch(err => {
+          console.warn('paint bake failed', err);
+          if (!fl.removed) remove(fl);
+        }).finally(() => { baking--; });
       }
     }
+  }
+
+  function halfToThickness(fl, raw) {
+    const out = new Float32Array(fl.w * fl.h);
+    for (let i = 0; i < out.length; i++) out[i] = THREE.DataUtils.fromHalfFloat(raw[i * 4]);
+    return out;
+  }
+
+  async function readThicknessAsync(fl) {
+    const target = fl.src === fl.a.texture ? fl.a : fl.b;
+    const raw = new Uint16Array(fl.w * fl.h * 4);
+    await renderer.readRenderTargetPixelsAsync(target, 0, 0, fl.w, fl.h, raw);
+    return halfToThickness(fl, raw);
   }
 
   // Thickness grid of a flow (CPU copy), used to bake it into the wall canvas.
@@ -288,12 +311,11 @@ export function createPaintFlow(renderer, scene) {
     const target = fl.src === fl.a.texture ? fl.a : fl.b;
     const raw = new Uint16Array(fl.w * fl.h * 4);
     renderer.readRenderTargetPixels(target, 0, 0, fl.w, fl.h, raw);
-    const out = new Float32Array(fl.w * fl.h);
-    for (let i = 0; i < out.length; i++) out[i] = THREE.DataUtils.fromHalfFloat(raw[i * 4]);
-    return out;
+    return halfToThickness(fl, raw);
   }
 
   function remove(fl) {
+    fl.removed = true;
     scene.remove(fl.mesh);
     fl.mesh.geometry.dispose();
     fl.draw.dispose();
