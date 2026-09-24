@@ -1,0 +1,9 @@
+services:
+  splatter:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      BOTS: "4"        # bots fill the arena up to this many players
+      BOT_SKILL: "0.4" # 0 = hopeless, 1 = sharp
+    restart: unless-stopped

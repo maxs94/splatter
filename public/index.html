@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Splatter</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="game"></div>
+  <div id="labels"></div>
+
+  <div id="vignette"></div>
+  <div id="splash"></div>
+
+  <div id="hud" hidden>
+    <div id="crosshair"></div>
+    <div id="hitmarker"></div>
+    <div id="timer">5:00</div>
+    <div id="board"></div>
+    <div id="feed"></div>
+    <div id="centerMsg"></div>
+    <div id="countdown"></div>
+    <div id="toast"></div>
+  </div>
+
+  <div id="scoreboard" class="panel" hidden></div>
+  <div id="roundEnd" class="panel" hidden></div>
+
+  <div id="pauseMenu" hidden>
+    <div class="panel pause-card">
+      <h2 id="pauseTitle">Menu</h2>
+      <p class="note">The match keeps running while this menu is open.</p>
+      <label class="slider">
+        <span class="slider-head">Sound effects <b id="volumeValue">80%</b></span>
+        <input id="volume" type="range" min="0" max="100" step="1">
+      </label>
+      <div class="buttons">
+        <button id="resume" class="btn primary">Back to game</button>
+        <button id="leaveMatch" class="btn">Leave</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="lobbyUi" hidden>
+    <div class="lobby-card">
+      <h1 class="lobby-title">Lobby</h1>
+      <p id="lobbyStatus" class="lobby-status"></p>
+      <ul id="lobbyList"></ul>
+      <button id="startMatch" class="btn primary big">Start match</button>
+      <p class="hint">Bots fill the empty slots when the match starts.</p>
+      <div class="buttons">
+        <button id="openViewer" class="btn">Animation viewer</button>
+        <button id="leaveLobby" class="btn">Leave</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="viewerUi" hidden>
+    <button id="closeViewer" class="btn">Back to lobby</button>
+    <span>Drag to orbit, right-drag to pan, scroll to zoom</span>
+  </div>
+
+  <div id="menu">
+    <div class="menu-card">
+      <h1 id="logo">SPLATTER</h1>
+      <p class="tagline">Everything is white. Everyone is white.<br>Paint the world to see it.</p>
+      <label>Name <input id="name" maxlength="16" autocomplete="off" spellcheck="false" placeholder="Your name"></label>
+      <div class="label">Paint</div>
+      <div id="palette"></div>
+      <button id="play">Join lobby</button>
+      <p id="menuError"></p>
+      <div class="controls">
+        <span><b>WASD</b> move</span>
+        <span><b>Space</b> jump</span>
+        <span><b>Mouse</b> aim / shoot</span>
+        <span><b>Tab</b> scores</span>
+        <span><b>Esc</b> menu</span>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/client.js"></script>
+</body>
+</html>
