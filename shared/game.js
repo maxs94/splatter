@@ -46,7 +46,17 @@ export const PALETTE = [
   '#6a4cff', // indigo
   '#d63bff', // purple
   '#ff2d92', // pink
+  // second row: deeper and muted tones, roughly under their bright neighbours
+  '#b3122e', // crimson
+  '#8a5a2b', // brown
+  '#c9a100', // gold
+  '#6f8a12', // olive
+  '#00766f', // dark teal
+  '#5fb8ff', // sky blue
+  '#1d2c86', // navy
+  '#7c7f87', // gray
   '#1c1c1e', // ink
+  '#ff7f6e', // coral
 ];
 
 // ---------------------------------------------------------------- Level

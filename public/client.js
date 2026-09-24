@@ -866,7 +866,7 @@ function enterGame(m) {
   me.hp = C.MAX_HP;
   showScreen('game');
   $('roundEnd').hidden = true;
-  renderBoard();
+  refreshStats();
   if (m.round.state === 'loading') {
     // Tell the server once the level is on screen. Background tabs don't render
     // frames, so fall back to a timer.
@@ -907,12 +907,12 @@ function handle(m) {
     case 'join':
       addRoster(m.player);
       if (screen === 'game') feed(`${nameTag(m.player.id)} joined`);
-      renderBoard();
+      refreshStats();
       break;
     case 'leave':
       if (screen === 'game' && roster.has(m.id)) feed(`${nameTag(m.id)} left`);
       removeRoster(m.id);
-      renderBoard();
+      refreshStats();
       break;
     case 'st':
       for (const [id, x, y, z, yaw, pitch] of m.l) {
@@ -989,7 +989,7 @@ function handle(m) {
         sfx.kill();
         toast(`You splatted ${victim ? victim.name : 'someone'}`);
       }
-      renderBoard();
+      refreshStats();
       break;
     }
     case 'respawn':
@@ -1158,13 +1158,8 @@ function sortedRoster() {
   return [...roster.values()].sort((a, b) => b.kills - a.kills || a.deaths - b.deaths);
 }
 
-function renderBoard() {
-  $('board').innerHTML = sortedRoster().slice(0, 6).map(r => `
-    <div class="row${r.id === me.id ? ' me' : ''}">
-      <span class="dot" style="background:${PALETTE[r.color]}"></span>
-      <span class="n">${esc(r.name)}</span>
-      <span class="k">${r.kills}</span>
-    </div>`).join('');
+// Scores changed: update the stats window if it's open (Tab or while respawning).
+function refreshStats() {
   if (!$('scoreboard').hidden) renderScoreboard();
 }
 
