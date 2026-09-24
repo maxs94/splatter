@@ -8,6 +8,7 @@ import {
 } from './shared/game.js';
 import { NavGraph } from './bots/nav.js';
 import { Bot, BOT_NAMES } from './bots/brain.js';
+import { prof } from './profiler.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
@@ -81,13 +82,19 @@ const vec = (v, n = 3) => Array.isArray(v) && v.length === n && v.every(Number.i
 const seed = () => (Math.random() * 0x7fffffff) | 0;
 
 function send(ws, msg) {
-  if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
+  if (ws && ws.readyState === ws.OPEN) {
+    const data = JSON.stringify(msg);
+    ws.send(data);
+    prof.sent(msg.t, data.length);
+  }
 }
 function broadcast(msg, exceptId) {
   const data = JSON.stringify(msg);
+  let n = 0;
   for (const p of players.values()) {
-    if (p.id !== exceptId && p.ws && p.ws.readyState === p.ws.OPEN) p.ws.send(data);
+    if (p.id !== exceptId && p.ws && p.ws.readyState === p.ws.OPEN) { p.ws.send(data); n++; }
   }
+  prof.sent(msg.t, data.length, n);
 }
 
 const humans = () => [...players.values()].filter(p => !p.bot);
@@ -195,11 +202,13 @@ function startMatch() {
 function beginCountdown() {
   setPhase('countdown', C.COUNTDOWN);
   maintainBots();
+  prof.matchStart({ humans: humanCount(), bots: players.size - humanCount() });
   for (const p of players.values()) respawn(p);
   broadcast({ t: 'round', round: roundInfo() });
 }
 
 function returnToLobby() {
+  prof.matchEnd('back to lobby', { humans: humanCount(), bots: players.size - humanCount() });
   projectiles.length = 0;
   setPhase('lobby');
   for (const p of [...players.values()]) {
@@ -287,6 +296,7 @@ wss.on('connection', ws => {
   ws.on('message', raw => {
     let m;
     try { m = JSON.parse(raw); } catch { return; }
+    if (m && typeof m.t === 'string') prof.received(m.t, raw.length);
     if (!m || typeof m !== 'object') return;
 
     if (m.t === 'join' && !me) {
@@ -384,11 +394,20 @@ let acc = 0;
 let stateTimer = 0;
 
 function simulate() {
+  const tick = prof.tickStart();
+  simulateStep();
+  prof.tickEnd(tick);
+}
+
+function simulateStep() {
   const now = Date.now();
 
   if (game.phase === 'playing') {
+    const t = prof.begin();
     for (const p of players.values()) if (p.bot) p.bot.update(STEP);
+    prof.end('bots', t);
   }
+  const tp = prof.begin();
 
   for (let i = projectiles.length - 1; i >= 0; i--) {
     const pr = projectiles[i];
@@ -439,6 +458,9 @@ function simulate() {
     return;
   }
 
+  prof.end('projectiles', tp);
+  prof.count('projectiles.stepped', projectiles.length);
+
   for (const p of players.values()) {
     if (!p.alive && now >= p.respawnAt) respawn(p);
     // Health regenerates after a while without damage.
@@ -455,6 +477,7 @@ function simulate() {
     setPhase('ended', C.INTERMISSION);
     projectiles.length = 0;
     broadcast({ t: 'round', round: roundInfo(), scores: scores() });
+    prof.matchEnd('match ended', { humans: humanCount(), bots: players.size - humanCount() });
   }
 }
 
@@ -462,19 +485,41 @@ setInterval(() => {
   const t = performance.now();
   acc += Math.min(0.25, (t - last) / 1000);
   last = t;
+  let steps = 0;
   while (acc >= STEP) {
     simulate();
     acc -= STEP;
     stateTimer += STEP;
+    steps++;
   }
+  if (steps > 1) prof.count('loop.catchupSteps', steps - 1);
   if (stateTimer >= 1 / C.STATE_RATE) {
+    const ts = prof.begin();
     stateTimer = 0;
     const l = [];
     for (const p of players.values()) {
       if (p.alive) l.push([p.id, r3(p.p[0]), r3(p.p[1]), r3(p.p[2]), r3(p.yaw), r3(p.pitch)]);
     }
     if (l.length) broadcast({ t: 'st', l });
+    prof.end('net.states', ts);
   }
 }, 1000 / C.TICK_RATE);
+
+// Profiling: a sample every 5 s, and a report when the server stops.
+if (prof.enabled) {
+  setInterval(() => {
+    if (game.phase !== 'playing' && game.phase !== 'countdown') return;
+    prof.sample({
+      humans: humanCount(), bots: players.size - humanCount(),
+      projectiles: projectiles.length, splats: splats.length,
+    });
+  }, 5000);
+  for (const sig of ['SIGINT', 'SIGTERM']) {
+    process.on(sig, async () => {
+      await prof.matchEnd('server stopped', { humans: humanCount(), bots: players.size - humanCount() });
+      process.exit(0);
+    });
+  }
+}
 
 server.listen(PORT, () => console.log(`Splatter running on http://localhost:${PORT}`));

@@ -6,6 +6,10 @@
 
 import { CONFIG as C, lineOfSight, movePlayer } from '../shared/game.js';
 import { Domain, plan, task as t } from './htn.js';
+import { prof } from '../profiler.js';
+
+// line of sight, counted for profiling
+const los = (a, b) => { prof.count('bot.lineOfSight'); return lineOfSight(a, b); };
 
 const TAU = Math.PI * 2;
 const DEBUG = !!process.env.BOT_DEBUG;
@@ -325,7 +329,7 @@ export class Bot {
     if (m && m.visible) return;
     const e = eye(this.pl.p);
     const d = dist(e, origin);
-    if (d < SENSE.visionRange && inView(e, this.pl.yaw, this.pl.pitch, origin) && lineOfSight(e, origin)) {
+    if (d < SENSE.visionRange && inView(e, this.pl.yaw, this.pl.pitch, origin) && los(e, origin)) {
       this.remember(shooter.id, jitter(shooter.p, 0.6), 'saw shot');
     } else if (d < SENSE.hearingRange) {
       this.remember(shooter.id, jitter(shooter.p, 1 + d * 0.15), 'heard shot');
@@ -358,6 +362,12 @@ export class Bot {
   }
 
   perceive() {
+    const t0 = prof.begin();
+    this.perceiveInner();
+    prof.end('bot.perceive', t0);
+  }
+
+  perceiveInner() {
     const now = this.now(), me = this.pl, e = eye(me.p);
     for (const q of this.game.players.values()) {
       if (q === me || !q.alive) continue;
@@ -367,7 +377,7 @@ export class Bot {
       const tracking = m && m.visible && now - m.lastVisible < SENSE.trackGraceMs;
 
       let seen = false;
-      if (d < SENSE.visionRange && (d < 2.5 || inView(e, me.yaw, me.pitch, target)) && lineOfSight(e, target)) {
+      if (d < SENSE.visionRange && (d < 2.5 || inView(e, me.yaw, me.pitch, target)) && los(e, target)) {
         // White on white is nearly invisible; paint, muzzle flashes and proximity give players away.
         let vis = 0.04 + 0.22 * q.paintHits + (now - q.lastShot < 500 ? 0.5 : 0) + (d < 4 ? 0.45 : 0);
         vis *= 1 - (0.6 * d) / SENSE.visionRange;
@@ -400,6 +410,13 @@ export class Bot {
   // ------------------------------------------------ World state for the planner
 
   worldState() {
+    const t0 = prof.begin();
+    const ws = this.worldStateInner();
+    prof.end('bot.worldState', t0);
+    return ws;
+  }
+
+  worldStateInner() {
     const now = this.now(), me = this.pl;
     let enemy = null, enemyDist = Infinity, enemyFresh = false, enemyPos = null, threat = null;
     for (const [id, m] of this.memory) {
@@ -426,12 +443,19 @@ export class Bot {
   }
 
   findCover(danger) {
+    const t0 = prof.begin();
+    const c = this.findCoverInner(danger);
+    prof.end('bot.findCover', t0);
+    return c;
+  }
+
+  findCoverInner(danger) {
     const me = this.pl, de = eye(danger);
     let best = null, bestD = Infinity;
     for (const n of this.nav.okNodes) {
       const d = hdist(n.p, me.p);
       if (d < 3 || d > 16 || d >= bestD || hdist(n.p, danger) < 8) continue;
-      if (lineOfSight(de, eye(n.p))) continue;
+      if (los(de, eye(n.p))) continue;
       best = n;
       bestD = d;
     }
@@ -443,7 +467,7 @@ export class Bot {
     for (let k = 0; k < 8; k++) {
       const n = this.nav.randomNode();
       const d = hdist(n.p, this.pl.p);
-      if (d > 6 && d < 30 && lineOfSight(e, [n.p[0], n.p[1] + 0.5, n.p[2]])) return n.p;
+      if (d > 6 && d < 30 && los(e, [n.p[0], n.p[1] + 0.5, n.p[2]])) return n.p;
     }
     return null;
   }
@@ -460,13 +484,18 @@ export class Bot {
 
   think() {
     if (!this.plan) return;
+    const t0 = prof.begin();
     const ws = this.worldState();
     const best = ROOT.findIndex(m => m.cond(ws));
-    if (best < this.rootIndex) this.replan(ws);
+    if (best < this.rootIndex) this.replan(ws, 'interrupt');
+    prof.end('bot.think', t0);
   }
 
-  replan(ws) {
+  replan(ws, reason = 'finished') {
+    const t0 = prof.begin();
+    prof.count(`bot.replan.${reason}`);
     const res = plan(D, ws, [t('Live')]);
+    prof.end('bot.plan', t0);
     this.gen = null;
     this.step = 0;
     if (!res) {
@@ -489,9 +518,14 @@ export class Bot {
       this.perceive();
       this.think();
     }
-    if (!this.plan) this.replan(this.worldState());
+    if (!this.plan) this.replan(this.worldState(), this.lastFailed ? 'failed' : 'finished');
+    this.lastFailed = false;
+    let t0 = prof.begin();
     this.runBehavior();
+    prof.end('bot.behaviors', t0);
+    t0 = prof.begin();
     this.steer(dt);
+    prof.end('bot.move', t0);
   }
 
   runBehavior() {
@@ -506,7 +540,12 @@ export class Bot {
       const r = this.gen.next();
       if (!r.done) return;
       this.gen = null;
-      if (r.value === false) { this.plan = null; return; }
+      if (r.value === false) {
+        prof.count(`bot.failed.${this.plan.steps[this.step].name}`);
+        this.lastFailed = true;
+        this.plan = null;
+        return;
+      }
       this.step++;
     }
   }

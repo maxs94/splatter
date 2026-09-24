@@ -2,6 +2,7 @@
 // with an edge wherever a simulated player can actually walk (or drop) to the neighbor.
 
 import { CONFIG as C, LEVEL, movePlayer } from '../shared/game.js';
+import { prof } from '../profiler.js';
 
 const CELL = 2;
 const MAX_STAND_HEIGHT = 4; // skips walls and pillar tops
@@ -114,6 +115,13 @@ export class NavGraph {
 
   // A* from the node nearest `from` to the node nearest `to`. Returns positions or null.
   findPath(from, to) {
+    const t = prof.begin();
+    const path = this.findPathInner(from, to);
+    prof.end('nav.findPath', t);
+    return path;
+  }
+
+  findPathInner(from, to) {
     const s = this.nearest(from), g = this.nearest(to);
     if (!s || !g) return null;
     const N = this.nodes.length;

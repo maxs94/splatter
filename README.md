@@ -88,6 +88,16 @@ between grid cells (`bots/nav.js`).
 
 Run with `BOT_DEBUG=1` to log every plan the bots make.
 
+## Profiling the server
+
+Set `PROFILE: "1"` in `docker-compose.yml` (and rebuild) to profile the server. While a
+match runs it logs a line every 5 s (`docker compose logs -f`), and after every match it
+writes a report to `./profiles/`: tick times against the 16.7 ms budget, time per code
+section (bots split into perception, planning, cover search, pathfinding, behaviors,
+movement), counters, network traffic per message type, event loop delay, GC, memory and
+the slowest ticks. `PROFILE_CPU: "1"` also records a `.cpuprofile` per match, which opens
+in the Performance tab of Chrome DevTools.
+
 ## Controls
 
 | Key | Action |
