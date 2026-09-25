@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { CONFIG as C, WEAPONS, GRENADE, PALETTE, LEVEL, movePlayer, stepProjectile, mulberry32, groundHeight, spawnYaw, eyeHeight, playerHeight } from '/shared/game.js';
+import { CONFIG as C, WEAPONS, GRENADE, DEFAULT_WEAPON, ECONOMY, PALETTE, LEVEL, movePlayer, stepProjectile, mulberry32, groundHeight, spawnYaw, eyeHeight, playerHeight } from '/shared/game.js';
 import { initAudio, play, tone, updateListener, getVolume, setVolume } from './js/audio.js';
 import { assetsReady, createCharacter, cloneGun, locomotion, poseCharacter, setAnim } from './js/characters.js';
 import { createLobby } from './js/lobby.js';
@@ -552,6 +552,8 @@ const sfx = {
   throw: () => tone(300, 520, 0.12, 'sine', 0.12),
   boom: p => { play('splat', { pos: p, vol: 2.2, rate: 0.55, jitter: 0.05 }) || tone(120, 30, 0.4, 'sawtooth', 0.25); },
   empty: () => tone(900, 700, 0.03, 'square', 0.05),
+  buy: () => tone(700, 1000, 0.06, 'triangle', 0.08),
+  deny: () => tone(220, 180, 0.14, 'square', 0.07),
   reload: () => tone(380, 520, 0.08, 'triangle', 0.08),
   splat: p => play('splat', { pos: p, vol: 1 }) || tone(170, 45, 0.16, 'sine', 0.2),
   step: (p, vol) => play('footstep', { pos: p, vol, jitter: 0.12 }),
@@ -571,13 +573,20 @@ const me = {
   id: null, color: 0, name: '', life: 0,
   p: [0, 0, 0], v: [0, 0, 0], onGround: false, crouch: false, eye: C.EYE_HEIGHT,
   yaw: 0, pitch: 0, hp: C.MAX_HP, alive: false,
-  killedBy: null, respawnAt: 0, stepDist: 0,
+  killedBy: null, respawnAt: 0, wantsSpawn: false, stepDist: 0,
   // Gun of this life (index into WEAPONS), predicted magazine and reload, grenades left.
-  weapon: 0, ammo: WEAPONS[0].ammo, reloadUntil: 0, grenades: C.GRENADES_PER_LIFE,
+  weapon: DEFAULT_WEAPON, ammo: WEAPONS[DEFAULT_WEAPON].ammo, reloadUntil: 0, grenades: 0,
+  money: 0, // told by the server
 };
-// The gun picked for the next life, kept per browser.
-let chosenWeapon = 0;
-try { chosenWeapon = Math.min(WEAPONS.length - 1, Math.max(0, parseInt(localStorage.getItem('splatter-weapon'), 10) || 0)); } catch {}
+// The gun and the number of grenades picked for the next life, kept per browser.
+let chosenWeapon = DEFAULT_WEAPON;
+let chosenGrenades = 1;
+try {
+  const w = parseInt(localStorage.getItem('splatter-weapon'), 10);
+  if (WEAPONS[w]) chosenWeapon = w;
+  const g = parseInt(localStorage.getItem('splatter-grenades'), 10);
+  if (g >= 0 && g <= ECONOMY.maxGrenades) chosenGrenades = g;
+} catch {}
 const myWalker = makeWalker();
 const roster = new Map();      // id -> { id, name, color, kills, deaths }
 const avatars = new Map();     // remote id -> avatar
@@ -912,22 +921,27 @@ function throwGrenade() {
   sfx.throw();
 }
 
-function chooseWeapon(w) {
+// Picks the gun (w) and the number of grenades (g) to buy for the next life. Before the
+// round starts the server buys again right away (see 'loadout'), otherwise on respawn.
+function chooseLoadout(w, g) {
   if (!WEAPONS[w]) return;
+  const newGun = w !== chosenWeapon;
   chosenWeapon = w;
-  try { localStorage.setItem('splatter-weapon', String(w)); } catch {}
-  send({ t: 'weapon', w });
-  // Before the round starts the server switches right away, otherwise on the next life.
-  if (round.state === 'loading' || round.state === 'countdown') armMe(w);
-  else if (me.alive && w !== me.weapon) toast(`${WEAPONS[w].name} next life`);
-  renderPicker();
+  chosenGrenades = g;
+  try {
+    localStorage.setItem('splatter-weapon', String(w));
+    localStorage.setItem('splatter-grenades', String(g));
+  } catch {}
+  send({ t: 'weapon', w, g });
+  if (newGun && me.alive && round.state === 'playing' && w !== me.weapon) toast(`${WEAPONS[w].name} next life`);
+  renderBuyMenu();
 }
 
-function armMe(w) {
+function armMe(w, grenades) {
   me.weapon = w;
   me.ammo = WEAPONS[w].ammo;
   me.reloadUntil = 0;
-  me.grenades = C.GRENADES_PER_LIFE;
+  me.grenades = grenades;
   if (viewGun) viewGun.scale.set(...GUN_SCALE[w].map(x => x * 0.5));
 }
 
@@ -1054,7 +1068,8 @@ function handle(m) {
       $('lobbyTitle').textContent = m.room.name;
       me.id = m.id;
       me.life = m.life;
-      armMe(chosenWeapon);
+      setMoney(m.money);
+      armMe(DEFAULT_WEAPON, 0);
       if (m.phase === 'lobby') showScreen('lobby');
       else enterGame(m);
       break;
@@ -1148,20 +1163,29 @@ function handle(m) {
     case 'hp':
       me.hp = m.hp;
       break;
+    case 'money':
+      setMoney(m.money, m.gain);
+      break;
+    case 'loadout':
+      armMe(m.w, m.g);
+      break;
     case 'kill': {
       const killer = roster.get(m.killer);
       const victim = roster.get(m.victim);
       if (killer) killer.kills = m.kk;
       if (victim) victim.deaths = m.vd;
-      feed(m.hs
+      feed((m.hs
         ? `${nameTag(m.killer)} <span class="hs">headshot</span> ${nameTag(m.victim)}`
-        : `${nameTag(m.killer)} splatted ${nameTag(m.victim)}`);
+        : `${nameTag(m.killer)} splatted ${nameTag(m.victim)}`)
+        + (m.bounty ? ` <span class="bounty">+$${m.bounty}</span>` : ''));
       if (m.victim === me.id) {
+        if (buy.open) openBuyMenu(false);
         me.alive = false;
         me.hp = 0;
         me.killedBy = m.killer;
         me.headshot = !!m.hs;
         me.respawnAt = performance.now() + C.RESPAWN_TIME * 1000;
+        me.wantsSpawn = false;
         firing = false;
       } else {
         const av = avatars.get(m.victim);
@@ -1191,7 +1215,8 @@ function handle(m) {
       if (m.id === me.id) {
         me.life = m.life;
         placeMe(m.p);
-        armMe(m.w);
+        armMe(m.w, m.g);
+        if (m.w !== chosenWeapon) toast(`Not enough money: ${WEAPONS[m.w].name}`);
       } else {
         const av = avatars.get(m.id);
         if (av) reviveAvatar(av, m.p);
@@ -1323,7 +1348,7 @@ $('roomList').addEventListener('click', e => {
   if (!b || joining) return;
   joining = true;
   $('browserError').textContent = '';
-  send({ t: 'join', room: b.dataset.room, weapon: chosenWeapon });
+  send({ t: 'join', room: b.dataset.room, weapon: chosenWeapon, grenades: chosenGrenades });
   renderBrowser();
 });
 {
@@ -1331,7 +1356,7 @@ $('roomList').addEventListener('click', e => {
     if (joining) return;
     joining = true;
     $('browserError').textContent = '';
-    send({ t: 'create', name: $('roomName').value.trim(), bots: $('createBots').checked, weapon: chosenWeapon });
+    send({ t: 'create', name: $('roomName').value.trim(), bots: $('createBots').checked, weapon: chosenWeapon, grenades: chosenGrenades });
     $('roomName').value = '';
     renderBrowser();
   };
@@ -1386,13 +1411,93 @@ function headshotBanner() {
   el.classList.add('on');
 }
 
-function renderPicker() {
-  $('weaponPicker').innerHTML = `<div class="picker-title">Gun for your next life</div><div class="picker-cards">${WEAPONS.map((g, i) => `
-    <div class="gun-card${i === chosenWeapon ? ' on' : ''}">
-      <kbd>${i + 1}</kbd><b>${esc(g.name)}</b><span>${g.ammo} rounds · ${esc(g.info)}</span>
-    </div>`).join('')}</div>`;
+const fmtMoney = n => '$' + n.toLocaleString('en-US');
+
+// Buy menu, like Counter-Strike's: B opens it, number keys walk through it. What you buy
+// is paid for when you next spawn (see buyLoadout in room.js). page: main, guns or nades.
+const buy = { open: false, page: 'main' };
+const gunsByPrice = WEAPONS.map((g, i) => ({ g, i })).sort((a, b) => a.g.price - b.g.price);
+// What the picked gun leaves for grenades (the free gun if the picked one is out of reach).
+const moneyAfterGun = () => me.money - (WEAPONS[chosenWeapon].price <= me.money ? WEAPONS[chosenWeapon].price : 0);
+
+function renderBuyMenu() {
+  const row = (key, label, price = '', cls = '') =>
+    `<div class="buy-row ${cls}"><kbd>${key}</kbd><span>${label}</span><em>${price}</em></div>`;
+  let title, rows;
+  if (buy.page === 'guns') {
+    title = 'Guns';
+    rows = gunsByPrice.map(({ g, i }, k) => row(k + 1, esc(g.name), g.price ? fmtMoney(g.price) : 'Free',
+      (i === chosenWeapon ? 'on' : '') + (g.price > me.money ? ' broke' : ''))).join('') + row(0, 'Back');
+  } else if (buy.page === 'nades') {
+    title = `Grenades · ${chosenGrenades}/${ECONOMY.maxGrenades}`;
+    const full = chosenGrenades >= ECONOMY.maxGrenades;
+    const broke = (chosenGrenades + 1) * ECONOMY.grenade > moneyAfterGun();
+    rows = row(1, 'Color grenade', fmtMoney(ECONOMY.grenade), (full ? 'on' : '') + (!full && broke ? ' broke' : ''))
+      + row(2, 'Sell all') + row(0, 'Back');
+  } else {
+    title = 'Buy';
+    rows = row(1, 'Guns', esc(WEAPONS[chosenWeapon].name)) + row(2, 'Grenades', `${chosenGrenades}/${ECONOMY.maxGrenades}`) + row(0, 'Exit');
+  }
+  $('buyMenu').innerHTML = `<div class="buy-title"><small>For your next life · ${fmtMoney(me.money)}</small>${title}</div>${rows}`;
 }
-renderPicker();
+
+function openBuyMenu(open) {
+  buy.open = open;
+  buy.page = 'main';
+  renderBuyMenu();
+}
+
+function denyMoney() {
+  sfx.deny();
+  const el = $('money');
+  el.classList.remove('deny');
+  void el.offsetWidth; // restart the animation
+  el.classList.add('deny');
+}
+
+// n: the number key pressed while the menu is open.
+function buyKey(n) {
+  if (buy.page === 'main') {
+    if (n === 0) return openBuyMenu(false);
+    if (n === 1) buy.page = 'guns';
+    else if (n === 2) buy.page = 'nades';
+  } else if (n === 0) {
+    buy.page = 'main';
+  } else if (buy.page === 'guns') {
+    const pick = gunsByPrice[n - 1];
+    if (!pick) return;
+    if (pick.g.price > me.money) return denyMoney();
+    sfx.buy();
+    chooseLoadout(pick.i, chosenGrenades);
+    return openBuyMenu(false);
+  } else if (buy.page === 'nades') {
+    if (n === 1) {
+      if (chosenGrenades >= ECONOMY.maxGrenades) return denyMoney();
+      if ((chosenGrenades + 1) * ECONOMY.grenade > moneyAfterGun()) return denyMoney();
+      sfx.buy();
+      chooseLoadout(chosenWeapon, chosenGrenades + 1);
+    } else if (n === 2) {
+      chooseLoadout(chosenWeapon, 0);
+    }
+  }
+  renderBuyMenu();
+}
+
+let gainTimer = 0;
+// gain: money just earned (a kill), popped up next to the balance.
+function setMoney(money, gain = 0) {
+  me.money = money;
+  $('moneyNum').textContent = fmtMoney(money);
+  if (gain) {
+    const el = $('moneyGain');
+    el.textContent = `+${fmtMoney(gain)}`;
+    el.classList.add('on');
+    clearTimeout(gainTimer);
+    gainTimer = setTimeout(() => el.classList.remove('on'), 1600);
+  }
+  renderBuyMenu();
+}
+renderBuyMenu();
 
 function splashScreen(color) {
   const el = $('splash');
@@ -1493,13 +1598,15 @@ function updateHud(now, dt) {
   const dead = !me.alive && me.killedBy !== null && round.state === 'playing';
   if (dead) {
     const s = Math.max(0, Math.ceil((me.respawnAt - now) / 1000));
-    $('centerMsg').innerHTML = `<span class="big">${me.headshot ? 'HEADSHOT' : 'SPLATTED'}</span>by ${nameTag(me.killedBy)} · back in ${s}`;
+    const back = me.wantsSpawn ? 'respawning…' : s > 0 ? `respawn in ${s}` : 'press <kbd>Space</kbd> to respawn';
+    $('centerMsg').innerHTML = `<span class="big">${me.headshot ? 'HEADSHOT' : 'SPLATTED'}</span>by ${nameTag(me.killedBy)} · ${back}`
+      + (buy.open ? '' : '<span class="sub">Press <kbd>B</kbd> to buy</span>');
   } else {
     $('centerMsg').innerHTML = '';
   }
 
-  // Gun picker: while waiting to respawn and before the round starts.
-  $('weaponPicker').hidden = !(dead || round.state === 'loading' || round.state === 'countdown');
+  if (buy.open && round.state === 'ended') openBuyMenu(false);
+  $('buyMenu').hidden = !buy.open;
   const gun = WEAPONS[me.weapon];
   $('ammo').hidden = !me.alive;
   $('ammoName').textContent = gun.name;
@@ -1545,11 +1652,12 @@ document.addEventListener('keydown', e => {
     return;
   }
   keys.add(e.code);
-  if (e.code === 'Space') { jumpQueued = true; e.preventDefault(); }
+  if (e.code === 'Space') { jumpQueued = true; e.preventDefault(); requestSpawn(); }
   if (e.repeat) return;
   if (e.code === 'KeyR') startReload();
-  const digit = /^Digit([1-9])$/.exec(e.code);
-  if (digit) chooseWeapon(Number(digit[1]) - 1);
+  if (e.code === 'KeyB') openBuyMenu(!buy.open);
+  const digit = /^Digit([0-9])$/.exec(e.code);
+  if (digit && buy.open) buyKey(Number(digit[1]));
 });
 document.addEventListener('keyup', e => {
   if (e.code === 'Tab') tabHeld = false;
@@ -1558,6 +1666,15 @@ document.addEventListener('keyup', e => {
   keys.delete(e.code);
 });
 window.addEventListener('blur', () => { keys.clear(); firing = false; tabHeld = false; });
+
+// Dead players stay down until they ask to come back, so there is time to buy. Only
+// once the respawn time is up, so the shot or jump you died with doesn't count.
+function requestSpawn() {
+  if (me.alive || me.wantsSpawn || me.killedBy === null || round.state !== 'playing') return;
+  if (performance.now() < me.respawnAt) return;
+  me.wantsSpawn = true;
+  send({ t: 'spawn' });
+}
 
 const locked = () => document.pointerLockElement === renderer.domElement;
 function lockPointer() {
@@ -1571,13 +1688,13 @@ document.addEventListener('mousemove', e => {
   me.pitch = Math.max(-1.55, Math.min(1.55, me.pitch - e.movementY * SENS * (invertY ? -1 : 1)));
 });
 document.addEventListener('mousedown', e => {
-  if (e.button === 0 && locked() && screen === 'game') firing = triggerPulled = true;
+  if (e.button === 0 && locked() && screen === 'game') { firing = triggerPulled = true; requestSpawn(); }
 });
 document.addEventListener('mouseup', e => {
   if (e.button === 0) firing = false;
 });
 document.addEventListener('pointerlockchange', () => {
-  if (!locked()) firing = false;
+  if (!locked()) { firing = false; if (buy.open) openBuyMenu(false); }
 });
 
 // ---------------------------------------------------------------- Pause menu (Esc)

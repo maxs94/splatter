@@ -2,7 +2,7 @@
 // in worker threads (room-worker.js), any number side by side.
 
 import {
-  CONFIG as C, WEAPONS, GRENADE, HIT_ZONES, PALETTE, LEVEL, segBox, segLevel, stepProjectile, hitPoint,
+  CONFIG as C, WEAPONS, GRENADE, DEFAULT_WEAPON, ECONOMY, bounty, HIT_ZONES, PALETTE, LEVEL, segBox, segLevel, stepProjectile, hitPoint,
   groundHeight, lineOfSight, spawnYaw, playerHeight, eyeHeight, hitZone, headCenter,
 } from './shared/game.js';
 import { NavGraph } from './bots/nav.js';
@@ -85,7 +85,10 @@ export class Room {
       hp: C.MAX_HP, alive: false, life: 0, kills: 0, deaths: 0, respawnAt: 0, lastShot: 0,
       lastDamage: 0, sentHp: C.MAX_HP, paintHits: 0, ready: false, bot: null,
       // The gun of this life, the one picked for the next, and its magazine.
-      weapon: 0, nextWeapon: 0, ammo: WEAPONS[0].ammo, reloadUntil: 0, grenades: C.GRENADES_PER_LIFE,
+      weapon: DEFAULT_WEAPON, nextWeapon: DEFAULT_WEAPON, ammo: WEAPONS[DEFAULT_WEAPON].ammo, reloadUntil: 0, grenades: 0,
+      // Money, kills since the last death (the bounty on this player), grenades wanted
+      // for the next life, and what this life's gun and grenades cost.
+      money: ECONOMY.start, streak: 0, wantGrenades: 0, spent: 0, wantsSpawn: false,
     };
   }
 
@@ -148,23 +151,33 @@ export class Room {
     p.alive = true;
     p.paintHits = 0;
     p.life++;
+    p.streak = 0;
     if (p.bot) p.bot.pickWeapon();
-    this.arm(p, p.nextWeapon);
+    this.buyLoadout(p);
     if (p.bot) p.bot.onRespawn();
-    this.broadcast({ t: 'respawn', id: p.id, p: p.p, life: p.life, w: p.weapon });
+    this.broadcast({ t: 'respawn', id: p.id, p: p.p, life: p.life, w: p.weapon, g: p.grenades });
   }
 
   kill(victim, killerId, headshot = false) {
     victim.alive = false;
     victim.deaths++;
     victim.respawnAt = Date.now() + C.RESPAWN_TIME * 1000;
+    victim.wantsSpawn = false; // humans come back when they ask for it, so they can buy first
     const killer = this.players.get(killerId);
+    // The killer collects the bounty on the victim, which grows with the victim's streak.
+    const reward = killer && killer !== victim ? bounty(victim.streak) : 0;
+    victim.streak = 0;
     if (killer) killer.kills++;
+    if (reward) {
+      killer.streak++;
+      killer.money = Math.min(ECONOMY.max, killer.money + reward);
+      send(killer.ws, { t: 'money', money: killer.money, gain: reward });
+    }
     if (victim.bot) victim.bot.onDeath();
     for (const p of this.players.values()) if (p.bot) p.bot.forget(victim.id);
     this.broadcast({
       t: 'kill', killer: killerId, victim: victim.id,
-      kk: killer ? killer.kills : 0, vd: victim.deaths, ...(headshot ? { hs: 1 } : {}),
+      kk: killer ? killer.kills : 0, vd: victim.deaths, ...(headshot ? { hs: 1 } : {}), ...(reward ? { bounty: reward } : {}),
     });
     // A headshot blows the paint off everything around, as far as a grenade reaches.
     if (headshot) {
@@ -191,6 +204,8 @@ export class Room {
     this.projectiles.length = 0;
     for (const p of this.players.values()) {
       p.kills = 0; p.deaths = 0; p.ready = false; p.alive = false;
+      p.money = ECONOMY.start; p.streak = 0; p.spent = 0;
+      send(p.ws, { t: 'money', money: p.money });
     }
     this.setPhase('loading', C.LOADING_TIMEOUT);
     this.broadcast({ t: 'start', ...this.matchState() });
@@ -230,12 +245,18 @@ export class Room {
     this.projectiles.length = 0;
   }
 
-  // Hands a player a gun with a full magazine and their grenades.
-  arm(p, w) {
+  // Buys the picked gun (the free one if the money doesn't reach) and as many of the
+  // wanted grenades as the rest pays for, and hands them over with a full magazine.
+  buyLoadout(p) {
+    const w = WEAPONS[p.nextWeapon].price <= p.money ? p.nextWeapon : DEFAULT_WEAPON;
+    const left = p.money - WEAPONS[w].price;
+    p.grenades = Math.max(0, Math.min(p.wantGrenades, ECONOMY.maxGrenades, Math.floor(left / ECONOMY.grenade)));
+    p.spent = WEAPONS[w].price + p.grenades * ECONOMY.grenade;
+    p.money -= p.spent;
     p.weapon = w;
     p.ammo = WEAPONS[w].ammo;
     p.reloadUntil = 0;
-    p.grenades = C.GRENADES_PER_LIFE;
+    send(p.ws, { t: 'money', money: p.money });
   }
 
   startReload(pl) {
@@ -380,21 +401,23 @@ export class Room {
 
   // Adds a human (the server checked that the room has space) and returns the player.
   // ws is anything with send(data), readyState and OPEN.
-  addHuman(ws, name, color, cid, weapon) {
+  // weapon, grenades: the loadout picked for the first life.
+  addHuman(ws, name, color, cid, weapon, grenades) {
     const id = nextPlayerId++;
     const me = this.makePlayer(id, ws, name, color);
     me.cid = cid;
     if (Number.isInteger(weapon) && WEAPONS[weapon]) me.nextWeapon = weapon;
+    if (Number.isInteger(grenades)) me.wantGrenades = Math.max(0, Math.min(ECONOMY.maxGrenades, grenades));
     this.players.set(id, me);
     const room = { id: this.id, name: this.name };
     if (this.inMatch()) {
       // Drop in to the running match.
-      send(ws, { t: 'welcome', id, life: me.life, phase: this.game.phase, room, ...this.matchState() });
+      send(ws, { t: 'welcome', id, life: me.life, phase: this.game.phase, room, money: me.money, ...this.matchState() });
       this.broadcast({ t: 'join', player: this.publicInfo(me) }, id);
       if (this.game.phase === 'countdown' || this.game.phase === 'playing') this.respawn(me);
       this.maintainBots();
     } else {
-      send(ws, { t: 'welcome', id, life: me.life, phase: this.game.phase, room });
+      send(ws, { t: 'welcome', id, life: me.life, phase: this.game.phase, room, money: me.money });
     }
     this.broadcast(this.lobbyInfo());
     this.hooks.changed();
@@ -448,13 +471,21 @@ export class Room {
         : eye.map((e, i) => e + d[i] * C.MUZZLE_OFFSET);
       const pr = m.t === 'shoot' ? this.fire(me, o, d) : this.throwGrenade(me, o, d);
       if (pr) send(me.ws, { t: 'ack', cid: m.cid, id: pr.id });
+    } else if (m.t === 'spawn') {
+      if (!me.alive && Date.now() >= me.respawnAt) me.wantsSpawn = true;
     } else if (m.t === 'reload') {
       if (me.alive) this.startReload(me);
     } else if (m.t === 'weapon') {
       if (!Number.isInteger(m.w) || !WEAPONS[m.w]) return;
+      if (!Number.isInteger(m.g) || m.g < 0 || m.g > ECONOMY.maxGrenades) return;
       me.nextWeapon = m.w;
-      // Before the round starts you can still change your mind.
-      if (this.game.phase === 'loading' || this.game.phase === 'countdown') this.arm(me, m.w);
+      me.wantGrenades = m.g;
+      // Before the round starts you can still change your mind: the last buy is refunded.
+      if (me.alive && (this.game.phase === 'loading' || this.game.phase === 'countdown')) {
+        me.money += me.spent;
+        this.buyLoadout(me);
+        send(me.ws, { t: 'loadout', w: me.weapon, g: me.grenades });
+      }
     }
   }
 
@@ -528,7 +559,7 @@ export class Room {
     prof.count('projectiles.stepped', projectiles.length);
 
     for (const p of players.values()) {
-      if (!p.alive && now >= p.respawnAt) this.respawn(p);
+      if (!p.alive && now >= p.respawnAt && (p.bot || p.wantsSpawn)) this.respawn(p);
       // Health regenerates after a while without damage.
       if (p.alive && p.hp < C.MAX_HP && now - p.lastDamage > C.REGEN_DELAY * 1000) {
         p.hp = Math.min(C.MAX_HP, p.hp + C.REGEN_RATE * dt);

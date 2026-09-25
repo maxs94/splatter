@@ -19,8 +19,6 @@ export const CONFIG = {
   MUZZLE_OFFSET: 0.2,
   RELOAD_SLACK: 0.1, // seconds the server lets a reload finish early, for latency
 
-  GRENADES_PER_LIFE: 1,
-
   MAX_HP: 100,
   RESPAWN_TIME: 3,
   REGEN_DELAY: 4,   // seconds without damage before health regenerates
@@ -36,22 +34,31 @@ export const CONFIG = {
   MAX_SPLATS: 5000,
 };
 
-// Guns, indexed by the id sent over the wire. You pick one, it is yours for your next life.
+// Guns, indexed by the id sent over the wire. You pick one, it is yours for your next life,
+// bought when you spawn (price) if you have the money, otherwise you get the free pistol.
 // interval: seconds between shots, auto: keeps firing while the button is held,
 // lifetime: seconds a shot flies before it dries up in the air (that is the range),
 // splat: size of the paint splat relative to SPLAT_RADIUS.
 export const WEAPONS = [
-  { name: 'Color gun', ammo: 30, auto: true, interval: 0.18, speed: 42, gravity: 9, lifetime: 4, damage: 25, reload: 1.6, splat: 1,
+  { name: 'Color gun', price: 400, ammo: 30, auto: true, interval: 0.18, speed: 42, gravity: 9, lifetime: 4, damage: 25, reload: 1.6, splat: 1,
     info: 'Lobs paint in an arc' },
-  { name: 'Pistol', ammo: 10, auto: false, interval: 0.22, speed: 38, gravity: 9, lifetime: 0.45, damage: 25, reload: 1.1, splat: 0.8,
+  { name: 'Pistol', price: 0, ammo: 10, auto: false, interval: 0.22, speed: 38, gravity: 9, lifetime: 0.45, damage: 25, reload: 1.1, splat: 0.8,
     info: 'Short range, one shot per click' },
-  { name: 'Rifle', ammo: 30, auto: true, interval: 0.1, speed: 60, gravity: 5, lifetime: 0.8, damage: 20, reload: 1.8, splat: 0.7,
+  { name: 'Rifle', price: 900, ammo: 30, auto: true, interval: 0.1, speed: 60, gravity: 5, lifetime: 0.8, damage: 20, reload: 1.8, splat: 0.7,
     info: 'Fast fire, middle range' },
-  { name: 'Sniper', ammo: 3, auto: false, interval: 1, speed: 170, gravity: 0, lifetime: 0.6, damage: 100, reload: 2.5, splat: 1.2,
+  { name: 'Sniper', price: 1400, ammo: 3, auto: false, interval: 1, speed: 170, gravity: 0, lifetime: 0.6, damage: 100, reload: 2.5, splat: 1.2,
     info: 'Straight and far, one hit splats' },
 ];
 
-// Everybody carries a color grenade. It bounces, then bursts and paints everything around it.
+// The free gun: what you get when you can't pay for the one you picked.
+export const DEFAULT_WEAPON = 1;
+
+// Money: everybody starts a match with start, a kill pays killBase plus perStreakKill for
+// every kill the victim made since their last death. Guns and grenades are bought each life.
+export const ECONOMY = { start: 0, grenade: 300, maxGrenades: 3, killBase: 300, perStreakKill: 150, max: 16000 };
+export const bounty = streak => ECONOMY.killBase + ECONOMY.perStreakKill * streak;
+
+// Color grenades, bought with money (see ECONOMY). One bounces, then bursts and paints everything around it.
 export const GRENADE = {
   speed: 22.6, gravity: 20, fuse: 1.6, bounce: 0.45,
   radius: 13.5, damage: 100, minDamage: 20, // damage at the center, falling to minDamage at the edge

@@ -4,7 +4,7 @@
 // they are very close; paint on a player, a fired shot or recent tracking make a
 // player visible. They also hear shots and feel roughly where a hit came from.
 
-import { CONFIG as C, WEAPONS, GRENADE, lineOfSight, movePlayer, spawnYaw } from '../shared/game.js';
+import { CONFIG as C, WEAPONS, GRENADE, DEFAULT_WEAPON, lineOfSight, movePlayer, spawnYaw } from '../shared/game.js';
 import { Domain, plan, task as t } from './htn.js';
 import { prof } from '../profiler.js';
 
@@ -332,12 +332,14 @@ export class Bot {
 
   // ------------------------------------------------ Events from the server
 
-  // Picks the gun for the next life.
+  // Picks the gun for the next life among those it can pay for, and a grenade or two.
   pickWeapon() {
-    const weights = [0.35, 0.2, 0.3, 0.15];
-    let r = Math.random(), w = 0;
+    const pl = this.pl;
+    const weights = [0.35, 0.2, 0.3, 0.15].map((x, i) => (WEAPONS[i].price <= pl.money ? x : 0));
+    let r = Math.random() * weights.reduce((a, b) => a + b, 0), w = 0;
     while (w < weights.length - 1 && (r -= weights[w]) > 0) w++;
-    this.pl.nextWeapon = w;
+    pl.nextWeapon = weights[w] ? w : DEFAULT_WEAPON;
+    pl.wantGrenades = 1 + (Math.random() < 0.4 ? 1 : 0);
   }
 
   // How far the current gun reaches, in meters (the color gun's arc reaches about 24).

@@ -195,8 +195,8 @@ function createRoom(name, bots) {
   return room;
 }
 
-// weapon: the gun the player picked for their first life.
-function enterRoom(conn, room, weapon) {
+// weapon, grenades: the loadout the player picked for their first life.
+function enterRoom(conn, room, weapon, grenades) {
   if (!room || room.members.size >= MAX_PLAYERS) {
     send(conn.ws, { t: 'joinFailed', reason: room ? 'full' : 'gone', max: MAX_PLAYERS });
     send(conn.ws, roomList());
@@ -204,7 +204,7 @@ function enterRoom(conn, room, weapon) {
   }
   conn.room = room;
   room.members.add(conn);
-  room.thread.worker.postMessage({ t: 'join', room: room.id, conn: conn.id, name: conn.name, color: conn.color, cid: conn.cid, weapon });
+  room.thread.worker.postMessage({ t: 'join', room: room.id, conn: conn.id, name: conn.name, color: conn.color, cid: conn.cid, weapon, grenades });
 }
 
 function leaveRoom(conn) {
@@ -270,9 +270,9 @@ wss.on('connection', ws => {
       if (m.t === 'create') {
         const name = String(m.name ?? '').replace(/[^\p{L}\p{N} _\-.!?']/gu, '').trim().slice(0, 24) || `${conn.name}'s game`;
         const bots = typeof m.bots === 'boolean' ? m.bots : DEFAULT_BOTS > 0;
-        enterRoom(conn, createRoom(name, bots), m.weapon);
+        enterRoom(conn, createRoom(name, bots), m.weapon, m.grenades);
       } else if (m.t === 'join') {
-        enterRoom(conn, rooms.get(String(m.room)), m.weapon);
+        enterRoom(conn, rooms.get(String(m.room)), m.weapon, m.grenades);
       }
       return;
     }

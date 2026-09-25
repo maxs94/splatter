@@ -142,17 +142,45 @@ html, body {
   font: 800 12px var(--font); text-align: center; background: var(--paper);
 }
 
-/* Gun picker while dead or before the round starts, keys 1-4 */
-#weaponPicker { position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%); text-align: center; }
-.picker-title { font-weight: 800; margin-bottom: 8px; text-shadow: 0 0 6px var(--paper); }
-.picker-cards { display: flex; gap: 10px; }
-.gun-card {
-  width: 150px; padding: 8px 10px; text-align: left; background: rgba(255, 255, 255, .92);
-  border: 3px solid rgba(17, 17, 20, .25); border-radius: 8px;
+/* Buy menu (B), a panel like the other menus; number keys pick the rows */
+#buyMenu {
+  position: absolute; left: 48px; top: 50%; transform: translateY(-50%); width: 280px;
+  background: rgba(255, 255, 255, .95); border: 3px solid var(--ink); border-radius: 10px;
+  padding: 16px 18px; box-shadow: 8px 8px 0 var(--ink);
 }
-.gun-card.on { border-color: var(--ink); box-shadow: 4px 4px 0 var(--ink); }
-.gun-card b { display: block; margin-top: 4px; font-size: 16px; }
-.gun-card span { display: block; font-size: 12px; font-weight: 600; color: var(--ink-soft); }
+.buy-title { margin: 0 0 8px; font-size: 22px; font-weight: 900; }
+.buy-title small { display: block; font-size: 12px; font-weight: 700; color: var(--ink-soft); text-transform: uppercase; letter-spacing: .08em; }
+.buy-row {
+  display: flex; align-items: center; gap: 10px; padding: 6px 0;
+  font-weight: 700; border-top: 1px solid rgba(17, 17, 20, .1);
+}
+.buy-row span { flex: 1; }
+.buy-row em { font-style: normal; font-weight: 800; font-variant-numeric: tabular-nums; }
+.buy-row.on span { font-weight: 900; }
+.buy-row.on span::after { content: ' ✓'; }
+.buy-row.broke span, .buy-row.broke kbd { opacity: .4; }
+.buy-row.broke em { color: var(--accent); }
+.buy-row.broke em::before { content: '✕ '; }
+#centerMsg .sub { display: block; margin-top: 8px; font-size: 16px; }
+
+/* Money, bottom right above the ammo, flashes red when it doesn't reach; a kill pops up what it paid */
+#money {
+  position: absolute; right: 24px; bottom: 150px; text-align: right;
+  font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 6px var(--paper), 0 0 2px var(--paper);
+}
+#money.deny { animation: deny .6s; }
+@keyframes deny {
+  0%, 60% { color: var(--accent); }
+  10%, 30% { transform: translateX(-5px); }
+  20%, 40% { transform: translateX(5px); }
+  50% { transform: none; }
+}
+#moneyGain {
+  display: block; font-size: 18px; color: #00a36c; opacity: 0; transition: opacity .6s;
+}
+#moneyGain.on { opacity: 1; transition: none; }
+.bounty { color: #00a36c; font-weight: 800; }
 
 #splash {
   position: fixed; inset: 0; pointer-events: none; opacity: 0;
