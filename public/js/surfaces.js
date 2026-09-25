@@ -67,6 +67,27 @@ const SPLAT_FRAGMENT = `
     gl_FragColor = vec4(toLinear(col), rim);
   }`;
 
+// Removes paint: the coverage mask drops to 1 - disc (min blending), so the level's
+// white base shows again. The color below is left alone, the mask hides it.
+const ERASE_FRAGMENT = `
+  uniform vec3 circles[${MAX_CIRCLES}];
+  uniform int count;
+  uniform float px;
+  uniform vec4 bounds;
+  varying vec2 vP;
+  vec2 p;
+  float disc(vec2 c, float r) { return clamp(0.5 + (r - length(p - c)) / px, 0.0, 1.0); }
+  void main() {
+    p = clamp(vP, bounds.xy, bounds.zw);
+    float m = 0.0;
+    for (int i = 0; i < ${MAX_CIRCLES}; i++) {
+      if (i >= count) break;
+      m = max(m, disc(circles[i].xy, circles[i].z));
+    }
+    if (m <= 0.0) discard;
+    gl_FragColor = vec4(1.0 - m, 0.0, 0.0, 1.0);
+  }`;
+
 // Flat ellipses (u, v, radius u, radius v) in meters; the color reaches `grow`
 // meters beyond the mask.
 const ELLIPSE_FRAGMENT = `
@@ -163,9 +184,19 @@ export function createSurfaces(renderer, blit) {
     grow: { value: 0 }, color: { value: new THREE.Vector3() },
   });
 
+  const eraseMat = new THREE.ShaderMaterial({
+    uniforms: {
+      circles: { value: new Float32Array(MAX_CIRCLES * 3) }, count: { value: 0 }, px: { value: 0.03 },
+      rect: { value: new THREE.Vector4() }, area: { value: new THREE.Vector4() }, bounds: { value: new THREE.Vector4() },
+    },
+    vertexShader: RECT_VERTEX, fragmentShader: ERASE_FRAGMENT, depthTest: false, depthWrite: false,
+    blending: THREE.CustomBlending, blendEquation: THREE.MinEquation, blendSrc: THREE.OneFactor, blendDst: THREE.OneFactor,
+  });
+  const eraseMats = { color: eraseMat, mask: eraseMat }; // for place(); only the mask is drawn
+
   // Compile the shaders now instead of on the first splat (empty rectangles, nothing is drawn).
   const warmTarget = new THREE.WebGLRenderTarget(1, 1, { depthBuffer: false });
-  for (const m of [splatMats.color, splatMats.mask, ellipseMats.color, ellipseMats.mask]) blit.draw(warmTarget, m);
+  for (const m of [splatMats.color, splatMats.mask, ellipseMats.color, ellipseMats.mask, eraseMat]) blit.draw(warmTarget, m);
   warmTarget.dispose();
 
   function makeTarget(options) {
@@ -278,6 +309,26 @@ export function createSurfaces(renderer, blit) {
     dirty = true;
   }
 
+  // Takes the paint off: circles as for splat().
+  function erase(face, circles) {
+    const px = face.surf.px;
+    for (let i = 0; i < circles.length; i += MAX_CIRCLES) {
+      const chunk = circles.slice(i, i + MAX_CIRCLES);
+      let u0 = Infinity, v0 = Infinity, u1 = -Infinity, v1 = -Infinity;
+      for (const [u, v, r] of chunk) {
+        const reach = r + 2 * px;
+        u0 = Math.min(u0, u - reach); v0 = Math.min(v0, v - reach);
+        u1 = Math.max(u1, u + reach); v1 = Math.max(v1, v + reach);
+      }
+      if (!place(face, eraseMats, u0, v0, u1, v1)) continue;
+      const arr = eraseMat.uniforms.circles.value;
+      chunk.forEach(([u, v, r], k) => { arr[k * 3] = u; arr[k * 3 + 1] = v; arr[k * 3 + 2] = r; });
+      eraseMat.uniforms.count.value = chunk.length;
+      blit.draw(mask, eraseMat);
+    }
+    dirty = true;
+  }
+
   // list: [[u, v, ru, rv]] in meters, rgb: sRGB 0..255, grow: meters the color reaches past the mask.
   function ellipses(face, list, rgb, grow) {
     for (let i = 0; i < list.length; i += MAX_ELLIPSES) {
@@ -316,7 +367,7 @@ export function createSurfaces(renderer, blit) {
   }
 
   return {
-    build, clear, uv, region, apply, splat, ellipses, touch, flush,
+    build, clear, uv, region, apply, splat, erase, ellipses, touch, flush,
     get color() { return color; }, get mask() { return mask; },
   };
 }

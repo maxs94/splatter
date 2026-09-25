@@ -58,6 +58,17 @@ export const GRENADE = {
   rays: 48, splat: 6.4,
 };
 
+// Where a shot lands on a player. The head is a small sphere the shot itself has to pass
+// through: an instant kill. legs: hits below this fraction of the height, arm: hits above
+// that more than this many meters to the side of the body. Arms and legs take limbDamage
+// of the gun's damage.
+export const HIT_ZONES = { headRadius: 0.13, legs: 0.45, arm: 0.22, limbDamage: 0.6 };
+
+// Where the character model's head is, measured on the standing model: its spine and neck
+// joints and the center of the head as [right, up, forward] from the feet. Aiming bends
+// the spine by half the pitch and the neck by 0.4 of it (see poseCharacter).
+const HEAD_RIG = { spine: [0.008, 1.206, 0.021], neck: [0.027, 1.428, 0.056], head: [0.054, 1.623, 0.069] };
+
 export const PALETTE = [
   '#ff3b30', // red
   '#ff9500', // orange
@@ -282,6 +293,40 @@ export function groundHeight(x, z, fromY) {
 
 export const playerHeight = s => (s.crouch ? CONFIG.CROUCH_HEIGHT : CONFIG.PLAYER_HEIGHT);
 export const eyeHeight = s => (s.crouch ? CONFIG.CROUCH_EYE_HEIGHT : CONFIG.EYE_HEIGHT);
+
+// Center of player s's head in the world, following the model's pose.
+export function headCenter(s) {
+  const { spine, neck, head } = HEAD_RIG;
+  // Bending towards the back when looking up: (forward, up) turned by angle a.
+  const turn = (f, u, a) => [f * Math.cos(a) - u * Math.sin(a), f * Math.sin(a) + u * Math.cos(a)];
+  const pitch = s.pitch || 0;
+  const [f1, u1] = turn(neck[2] - spine[2], neck[1] - spine[1], pitch * 0.5);
+  const [f2, u2] = turn(head[2] - neck[2], head[1] - neck[1], pitch * 0.9);
+  const fwd = spine[2] + f1 + f2, up = spine[1] + u1 + u2 + playerHeight(s) - CONFIG.PLAYER_HEIGHT;
+  const right = head[0], yaw = s.yaw || 0;
+  return [
+    s.p[0] + right * Math.cos(yaw) - fwd * Math.sin(yaw),
+    s.p[1] + up,
+    s.p[2] - right * Math.sin(yaw) - fwd * Math.cos(yaw),
+  ];
+}
+
+// Which part of player s the shot o -> o + s hit: 'head', 'body', 'arm' or 'leg'.
+// off: where it entered the hitbox, relative to the feet. Facing yaw, the player's right
+// is (cos yaw, 0, -sin yaw).
+export function hitZone(o, seg, off, s) {
+  const h = playerHeight(s);
+  const head = headCenter(s);
+  // Closest point of the shot's path to the center of the head. The path goes on past
+  // this step's segment: it entered the hitbox and would fly on through it.
+  const len2 = seg[0] ** 2 + seg[1] ** 2 + seg[2] ** 2 || 1;
+  const t = Math.max(0, ((head[0] - o[0]) * seg[0] + (head[1] - o[1]) * seg[1] + (head[2] - o[2]) * seg[2]) / len2);
+  const d2 = [0, 1, 2].reduce((sum, k) => sum + (o[k] + seg[k] * t - head[k]) ** 2, 0);
+  if (d2 < HIT_ZONES.headRadius ** 2) return 'head';
+  if (off[1] < h * HIT_ZONES.legs) return 'leg';
+  const side = off[0] * Math.cos(s.yaw || 0) - off[2] * Math.sin(s.yaw || 0);
+  return Math.abs(side) > HIT_ZONES.arm ? 'arm' : 'body';
+}
 
 function overlapping(p, h) {
   const r = CONFIG.PLAYER_RADIUS;

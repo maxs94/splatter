@@ -117,6 +117,19 @@ function markGround(f, u, v, r, rgb) {
   }
 }
 
+// Forgets the paint within r meters of (u, v), after a headshot washed it off.
+function clearGround(f, u, v, r) {
+  const g = f.ground;
+  const x0 = Math.max(0, Math.floor((u - r - f.umin) * GROUND_PPM)), x1 = Math.min(g.w - 1, Math.floor((u + r - f.umin) * GROUND_PPM));
+  const y0 = Math.max(0, Math.floor((v - r - f.vmin) * GROUND_PPM)), y1 = Math.min(g.h - 1, Math.floor((v + r - f.vmin) * GROUND_PPM));
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const cu = f.umin + (x + 0.5) / GROUND_PPM, cv = f.vmin + (y + 0.5) / GROUND_PPM;
+      if ((cu - u) ** 2 + (cv - v) ** 2 <= r * r) g.set[y * g.w + x] = 0;
+    }
+  }
+}
+
 for (const b of LEVEL.boxes) {
   for (let axis = 0; axis < 3; axis++) {
     for (const sign of [1, -1]) {
@@ -242,6 +255,16 @@ function splatShape(r, seed) {
 // and glossy highlights). mask = false only records the color on the ground, for
 // footprints: the core of a floor splat is drawn by the paint simulation instead.
 function paintCircles(f, sp, circles, base, mask = true) {
+  const hits = faceCircles(f, sp, circles);
+  if (!hits.length) return false;
+  if (mask) surfaces.splat(f, hits, base);
+  if (f.ground) for (const [u, v, r] of hits) markGround(f, u, v, r, base);
+  return true;
+}
+
+// The splat's circles (spheres of paint centered in the hit plane) where they cut face f,
+// as [u, v, r] on the face.
+function faceCircles(f, sp, circles) {
   const t1 = (sp.a + 1) % 3, t2 = (sp.a + 2) % 3;
   const c3 = [0, 0, 0];
   const hits = [];
@@ -252,10 +275,7 @@ function paintCircles(f, sp, circles, base, mask = true) {
     if (dist >= rad) continue;
     hits.push([c3[f.ua], c3[f.va], Math.sqrt(rad * rad - dist * dist)]);
   }
-  if (!hits.length) return false;
-  if (mask) surfaces.splat(f, hits, base);
-  if (f.ground) for (const [u, v, r] of hits) markGround(f, u, v, r, base);
-  return true;
+  return hits;
 }
 
 // Each splat circle is treated as a sphere of paint centered in the hit plane.
@@ -274,6 +294,7 @@ function paintSplat(sp, mode = 'live') {
 
 function paintSplatInner(sp, mode) {
   const { circles, tint } = splatShape(sp.r, sp.s);
+  if (sp.erase) { eraseSplat(sp, circles); return; }
   const rgb = PALETTE_RGB[sp.c] || PALETTE_RGB[0];
   const reach = sp.r * 2;
   const hitFloor = sp.a === 1 && sp.sg > 0 && Math.abs(sp.p[1]) < 1e-3;
@@ -298,6 +319,21 @@ function paintSplatInner(sp, mode) {
       continue;
     }
     paintCircles(f, sp, circles, base);
+  }
+}
+
+// A headshot's splat takes the paint off instead of adding some (see surfaces.erase).
+function eraseSplat(sp, circles) {
+  const reach = sp.r * 2;
+  for (const f of faces) {
+    if (f.axis === sp.a && f.sign !== sp.sg) continue;
+    if (Math.abs(sp.p[f.axis] - f.plane) > reach) continue;
+    if (Math.max(f.umin - sp.p[f.ua], sp.p[f.ua] - f.umax) > reach) continue;
+    if (Math.max(f.vmin - sp.p[f.va], sp.p[f.va] - f.vmax) > reach) continue;
+    const hits = faceCircles(f, sp, circles);
+    if (!hits.length) continue;
+    surfaces.erase(f, hits);
+    if (f.ground) for (const [u, v, r] of hits) clearGround(f, u, v, r);
   }
 }
 
@@ -522,6 +558,11 @@ const sfx = {
   hit: () => tone(1500, 1100, 0.05, 'square', 0.05),
   hurt: () => tone(240, 80, 0.25, 'sawtooth', 0.1),
   kill: () => { tone(500, 1000, 0.12, 'triangle', 0.14); setTimeout(() => tone(750, 1500, 0.16, 'triangle', 0.12), 90); },
+  headshot: () => {
+    tone(1800, 2400, 0.06, 'square', 0.08);
+    setTimeout(() => tone(900, 1800, 0.14, 'triangle', 0.16), 60);
+    setTimeout(() => tone(1350, 2700, 0.22, 'triangle', 0.13), 150);
+  },
 };
 
 // ---------------------------------------------------------------- State
@@ -745,6 +786,7 @@ function reviveAvatar(av, p) {
 // Liquid paint in the air (projectiles and impact splashes), see js/fluid.js.
 const fluid = createFluid(renderer);
 const paintColors = PALETTE.map(hex => new THREE.Color(hex));
+const WHITE = new THREE.Color(1, 1, 1);
 
 // w: index into WEAPONS, or 'g' for a grenade.
 function spawnProjectile(key, o, v, color, offset, w = 0) {
@@ -1049,9 +1091,9 @@ function handle(m) {
       // A grenade paints many spots at once; its 'boom' does the sound and the burst.
       if (m.nade) break;
       removeProjectile(m.id);
-      sfx.splat(m.p);
       const n = [0, 0, 0];
       n[m.a] = m.sg;
+      sfx.splat(m.p);
       // kills leave a big splat, and a bigger burst
       const big = m.id === 0;
       fluid.splash(m.p, n, paintColors[m.c], big ? { count: 28, speed: 4.2, size: 0.12, life: 0.8 } : {});
@@ -1074,7 +1116,7 @@ function handle(m) {
         const out = [m.off[0], 0.3, m.off[2]];
         fluid.splash(at.toArray(), out, paintColors[m.c], { count: 10, speed: 2.6, size: 0.08, life: 0.5 });
       }
-      if (m.owner === me.id) { hitMarker(false); sfx.hit(); }
+      if (m.owner === me.id) { hitMarker(false, m.z === 'a' || m.z === 'l'); sfx.hit(); }
       break;
     }
     case 'hp':
@@ -1085,21 +1127,36 @@ function handle(m) {
       const victim = roster.get(m.victim);
       if (killer) killer.kills = m.kk;
       if (victim) victim.deaths = m.vd;
-      feed(`${nameTag(m.killer)} splatted ${nameTag(m.victim)}`);
+      feed(m.hs
+        ? `${nameTag(m.killer)} <span class="hs">headshot</span> ${nameTag(m.victim)}`
+        : `${nameTag(m.killer)} splatted ${nameTag(m.victim)}`);
       if (m.victim === me.id) {
         me.alive = false;
         me.hp = 0;
         me.killedBy = m.killer;
+        me.headshot = !!m.hs;
         me.respawnAt = performance.now() + C.RESPAWN_TIME * 1000;
         firing = false;
       } else {
         const av = avatars.get(m.victim);
         if (av) killAvatar(av);
       }
+      // A headshot bursts like a grenade, in white: its splats wash the paint off.
+      if (m.hs) {
+        const av = avatars.get(m.victim);
+        const p = m.victim === me.id ? me.p : av && av.group.position.toArray();
+        if (p) {
+          const head = [p[0], p[1] + C.PLAYER_HEIGHT - 0.18, p[2]];
+          sfx.boom(head);
+          fluid.splash(head, [0, 1, 0], WHITE, { count: 120, speed: 12, size: 0.2, life: 1.1 });
+          const d = Math.hypot(head[0] - me.p[0], head[1] - me.p[1] - C.EYE_HEIGHT, head[2] - me.p[2]);
+          if (me.alive) shake = Math.max(shake, 1 - d / (GRENADE.radius * 1.5));
+        }
+      }
       if (m.killer === me.id && m.victim !== me.id) {
         hitMarker(true);
-        sfx.kill();
-        toast(`You splatted ${victim ? victim.name : 'someone'}`);
+        if (m.hs) { sfx.headshot(); headshotBanner(); } else sfx.kill();
+        toast(`You ${m.hs ? 'headshot' : 'splatted'} ${victim ? victim.name : 'someone'}`);
       }
       refreshStats();
       break;
@@ -1286,12 +1343,21 @@ function toast(text) {
 }
 
 let hitTimer = 0;
-function hitMarker(isKill) {
+// limb: a hit on an arm or a leg (less damage), shown smaller.
+function hitMarker(isKill, limb = false) {
   const el = $('hitmarker');
   el.classList.add('on');
   el.classList.toggle('kill', isKill);
+  el.classList.toggle('limb', limb && !isKill);
   clearTimeout(hitTimer);
-  hitTimer = setTimeout(() => el.classList.remove('on', 'kill'), isKill ? 350 : 120);
+  hitTimer = setTimeout(() => el.classList.remove('on', 'kill', 'limb'), isKill ? 350 : 120);
+}
+
+function headshotBanner() {
+  const el = $('headshot');
+  el.classList.remove('on');
+  void el.offsetWidth; // restart the animation
+  el.classList.add('on');
 }
 
 function renderPicker() {
@@ -1401,7 +1467,7 @@ function updateHud(now, dt) {
   const dead = !me.alive && me.killedBy !== null && round.state === 'playing';
   if (dead) {
     const s = Math.max(0, Math.ceil((me.respawnAt - now) / 1000));
-    $('centerMsg').innerHTML = `<span class="big">SPLATTED</span>by ${nameTag(me.killedBy)} · back in ${s}`;
+    $('centerMsg').innerHTML = `<span class="big">${me.headshot ? 'HEADSHOT' : 'SPLATTED'}</span>by ${nameTag(me.killedBy)} · back in ${s}`;
   } else {
     $('centerMsg').innerHTML = '';
   }

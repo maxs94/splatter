@@ -2,8 +2,8 @@
 // in worker threads (room-worker.js), any number side by side.
 
 import {
-  CONFIG as C, WEAPONS, GRENADE, PALETTE, LEVEL, segBox, segLevel, stepProjectile, hitPoint,
-  groundHeight, lineOfSight, spawnYaw, playerHeight, eyeHeight,
+  CONFIG as C, WEAPONS, GRENADE, HIT_ZONES, PALETTE, LEVEL, segBox, segLevel, stepProjectile, hitPoint,
+  groundHeight, lineOfSight, spawnYaw, playerHeight, eyeHeight, hitZone, headCenter,
 } from './shared/game.js';
 import { NavGraph } from './bots/nav.js';
 import { Bot, BOT_NAMES } from './bots/brain.js';
@@ -154,7 +154,7 @@ export class Room {
     this.broadcast({ t: 'respawn', id: p.id, p: p.p, life: p.life, w: p.weapon });
   }
 
-  kill(victim, killerId) {
+  kill(victim, killerId, headshot = false) {
     victim.alive = false;
     victim.deaths++;
     victim.respawnAt = Date.now() + C.RESPAWN_TIME * 1000;
@@ -164,8 +164,13 @@ export class Room {
     for (const p of this.players.values()) if (p.bot) p.bot.forget(victim.id);
     this.broadcast({
       t: 'kill', killer: killerId, victim: victim.id,
-      kk: killer ? killer.kills : 0, vd: victim.deaths,
+      kk: killer ? killer.kills : 0, vd: victim.deaths, ...(headshot ? { hs: 1 } : {}),
     });
+    // A headshot blows the paint off everything around, as far as a grenade reaches.
+    if (headshot) {
+      this.paintBurst(headCenter(victim), 0, true);
+      return;
+    }
     // Big splat of the killer's color where the victim fell.
     const [x, y, z] = victim.p;
     this.addSplat({
@@ -284,19 +289,7 @@ export class Room {
     const owner = this.players.get(pr.owner);
     for (const p of this.players.values()) if (p.bot && owner) p.bot.onShot(owner, c);
 
-    // Rays spread evenly over a sphere (Fibonacci) find the surfaces around the burst.
-    const n = GRENADE.rays;
-    for (let i = 0; i < n; i++) {
-      const y = 1 - (2 * (i + 0.5)) / n, r = Math.sqrt(1 - y * y), a = i * 2.39996323;
-      const s = [Math.cos(a) * r * GRENADE.radius, y * GRENADE.radius, Math.sin(a) * r * GRENADE.radius];
-      const hit = segLevel(c, s, 0);
-      if (!hit) continue;
-      const q = hitPoint(c, s, hit);
-      this.addSplat({
-        id: 0, p: q.map(r3), a: hit.axis, sg: hit.sign, c: pr.color, nade: 1,
-        r: r3(C.SPLAT_RADIUS * GRENADE.splat * (1 - 0.5 * hit.t) * (0.85 + Math.random() * 0.3)), s: seed(),
-      });
-    }
+    this.paintBurst(c, pr.color);
 
     for (const target of [...this.players.values()]) {
       if (target.id === pr.owner || !target.alive) continue;
@@ -311,9 +304,27 @@ export class Room {
     }
   }
 
+  // Paints every surface within a grenade's reach of c, or with erase, takes the paint
+  // off them (a headshot). Rays spread evenly over a sphere (Fibonacci) find the surfaces.
+  paintBurst(c, color, erase = false) {
+    const n = GRENADE.rays;
+    for (let i = 0; i < n; i++) {
+      const y = 1 - (2 * (i + 0.5)) / n, r = Math.sqrt(1 - y * y), a = i * 2.39996323;
+      const s = [Math.cos(a) * r * GRENADE.radius, y * GRENADE.radius, Math.sin(a) * r * GRENADE.radius];
+      const hit = segLevel(c, s, 0);
+      if (!hit) continue;
+      const q = hitPoint(c, s, hit);
+      this.addSplat({
+        id: 0, p: q.map(r3), a: hit.axis, sg: hit.sign, c: color, nade: 1, ...(erase ? { erase: 1 } : {}),
+        r: r3(C.SPLAT_RADIUS * GRENADE.splat * (1 - 0.5 * hit.t) * (0.85 + Math.random() * 0.3)), s: seed(),
+      });
+    }
+  }
+
   // Applies a paint hit to a player and tells everybody. off: where the paint landed,
-  // relative to the player's feet, dir: which way it pushed (for the ragdoll).
-  damage(target, pr, dmg, off, dir) {
+  // relative to the player's feet, dir: which way it pushed (for the ragdoll),
+  // zone: the part of the body a shot hit (see hitZone), none for grenades.
+  damage(target, pr, dmg, off, dir, zone = null) {
     target.hp -= dmg;
     target.lastDamage = Date.now();
     target.sentHp = Math.max(0, target.hp);
@@ -323,8 +334,9 @@ export class Room {
       t: 'hitp', id: pr.id, owner: pr.owner, target: target.id, c: pr.color, s: seed(),
       off: off.map(r3), yaw: r3(target.yaw), hp: Math.max(0, Math.ceil(target.hp)),
       dir: dir.map(r3), // for the ragdoll push
+      ...(zone ? { z: zone[0] } : {}), // h(ead), b(ody), a(rm), l(eg)
     });
-    if (target.hp <= 0) this.kill(target, pr.owner);
+    if (target.hp <= 0) this.kill(target, pr.owner, zone === 'head');
   }
 
   // ---------------------------------------------------------------- Bots
@@ -485,7 +497,11 @@ export class Room {
         const q = hitPoint(o, s, ph);
         const target = ph.pl;
         const speed = Math.hypot(...pr.v) || 1;
-        this.damage(target, pr, WEAPONS[pr.w].damage, q.map((x, k) => x - target.p[k]), pr.v.map(x => x / speed));
+        const off = q.map((x, k) => x - target.p[k]);
+        const zone = hitZone(o, s, off, target);
+        const gun = WEAPONS[pr.w].damage;
+        const dmg = zone === 'head' ? Math.max(target.hp, gun) : zone === 'body' ? gun : gun * HIT_ZONES.limbDamage;
+        this.damage(target, pr, dmg, off, pr.v.map(x => x / speed), zone);
       } else if (hit) {
         projectiles.splice(i, 1);
         const q = hitPoint(o, s, hit);
