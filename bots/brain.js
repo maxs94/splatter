@@ -4,7 +4,7 @@
 // they are very close; paint on a player, a fired shot or recent tracking make a
 // player visible. They also hear shots and feel roughly where a hit came from.
 
-import { CONFIG as C, lineOfSight, movePlayer } from '../shared/game.js';
+import { CONFIG as C, lineOfSight, movePlayer, spawnYaw } from '../shared/game.js';
 import { Domain, plan, task as t } from './htn.js';
 import { prof } from '../profiler.js';
 
@@ -310,7 +310,7 @@ export class Bot {
 
   onRespawn() {
     this.reset();
-    this.pl.yaw = this.wantYaw = Math.atan2(this.pl.p[0], this.pl.p[2]);
+    this.pl.yaw = this.wantYaw = spawnYaw(this.pl.p);
     this.pl.pitch = 0;
   }
 
