@@ -1252,6 +1252,9 @@ let jumpQueued = false;
 let tabHeld = false;
 let recoil = 0;
 const SENS = 0.0022;
+// Inverted look: moving the mouse forward looks down. Set in the Esc menu, kept per browser.
+let invertY = false;
+try { invertY = localStorage.getItem('splatter-invert-y') === '1'; } catch {}
 
 document.addEventListener('keydown', e => {
   if (screen !== 'game') return;
@@ -1278,7 +1281,7 @@ function lockPointer() {
 document.addEventListener('mousemove', e => {
   if (screen !== 'game' || !locked() || !me.alive) return;
   me.yaw -= e.movementX * SENS;
-  me.pitch = Math.max(-1.55, Math.min(1.55, me.pitch - e.movementY * SENS));
+  me.pitch = Math.max(-1.55, Math.min(1.55, me.pitch - e.movementY * SENS * (invertY ? -1 : 1)));
 });
 document.addEventListener('mousedown', e => {
   if (e.button === 0 && locked() && screen === 'game') firing = true;
@@ -1299,6 +1302,11 @@ document.addEventListener('pointerlockchange', () => {
   show();
   slider.addEventListener('input', () => { setVolume(slider.value / 100); show(); });
   slider.addEventListener('change', () => { initAudio(); sfx.shoot(); });
+  $('invertY').checked = invertY;
+  $('invertY').addEventListener('change', e => {
+    invertY = e.target.checked;
+    try { localStorage.setItem('splatter-invert-y', invertY ? '1' : '0'); } catch {}
+  });
   $('resume').addEventListener('click', () => { initAudio(); lockPointer(); });
   $('leaveMatch').addEventListener('click', leaveRoom);
 }

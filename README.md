@@ -126,7 +126,7 @@ matched with the other.
 | Mouse | Aim |
 | Left click (hold) | Shoot |
 | Tab (hold) | Stats (also shown while waiting to respawn) |
-| Esc | Menu with sound volume (the match keeps running) |
+| Esc | Menu with sound volume and an option to invert the mouse Y axis (the match keeps running) |
 
 ## How it works
 

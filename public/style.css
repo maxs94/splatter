@@ -200,6 +200,7 @@ label, .label {
 .slider { display: block; margin: 8px 0 22px; text-transform: none; letter-spacing: 0; font-size: 15px; color: var(--ink); }
 .slider-head { display: flex; justify-content: space-between; margin-bottom: 8px; font-weight: 700; }
 .slider input { width: 100%; accent-color: var(--ink); }
+.toggle.setting { margin: -8px 0 22px; }
 
 /* ------------------------------------------------ Lobby */
 
