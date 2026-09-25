@@ -335,6 +335,7 @@ export class Room {
       off: off.map(r3), yaw: r3(target.yaw), hp: Math.max(0, Math.ceil(target.hp)),
       dir: dir.map(r3), // for the ragdoll push
       ...(zone ? { z: zone[0] } : {}), // h(ead), b(ody), a(rm), l(eg)
+      ...(pr.nade ? { g: 1 } : {}), // a grenade sprays the whole side facing it
     });
     if (target.hp <= 0) this.kill(target, pr.owner, zone === 'head');
   }

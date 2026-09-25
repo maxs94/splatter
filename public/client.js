@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { CONFIG as C, WEAPONS, GRENADE, PALETTE, LEVEL, movePlayer, stepProjectile, mulberry32, groundHeight, spawnYaw, eyeHeight } from '/shared/game.js';
+import { CONFIG as C, WEAPONS, GRENADE, PALETTE, LEVEL, movePlayer, stepProjectile, mulberry32, groundHeight, spawnYaw, eyeHeight, playerHeight } from '/shared/game.js';
 import { initAudio, play, tone, updateListener, getVolume, setVolume } from './js/audio.js';
 import { assetsReady, createCharacter, cloneGun, locomotion, poseCharacter, setAnim } from './js/characters.js';
 import { createLobby } from './js/lobby.js';
@@ -646,7 +646,7 @@ function makeAvatar() {
   const ch = createCharacter({ bodyMat: avatarMat, gunShellMat: avatarMat, gunDarkMat: avatarMat });
   scene.add(ch.root);
   return {
-    ch, group: ch.root, dead: false, dots: [], stepDist: 0, walker: makeWalker(),
+    ch, group: ch.root, dead: false, dots: [], sprayDots: [], stepDist: 0, walker: makeWalker(),
     target: new THREE.Vector3(), yaw: 0, targetYaw: 0, pitch: 0, targetPitch: 0,
     vel: new THREE.Vector3(),
   };
@@ -744,9 +744,34 @@ function paintAvatar(av, off, color, seed) {
   while (av.dots.length > 120) av.dots.shift().removeFromParent();
 }
 
+// A grenade burst coats the whole side of the body that faced it. dir: from the
+// burst to the player. These dots stay until the player respawns, shots don't push them out.
+function sprayAvatar(av, dir, color, seed) {
+  const rng = mulberry32(seed);
+  const base = av.group.position;
+  const facing = Math.atan2(-dir[2], -dir[0]);
+  const height = playerHeight(av);
+  av.group.updateMatrixWorld(true);
+  av.ch.skinned.computeBoundingSphere();
+  for (let i = 0; i < 36; i++) {
+    const a = facing + (rng() - 0.5) * Math.PI * 1.1;
+    const q = new THREE.Vector3(base.x + Math.cos(a) * 0.5, base.y + 0.05 + rng() * height, base.z + Math.sin(a) * 0.5);
+    const hit = surfaceAt(av, q);
+    if (!hit) continue;
+    const dot = new THREE.Mesh(dotGeo, colorMats[color] || colorMats[0]);
+    hit.bone.add(dot);
+    dot.position.copy(hit.bone.worldToLocal(hit.point.clone()));
+    dot.scale.setScalar((0.05 + rng() * 0.07) / hit.bone.getWorldScale(_p).x);
+    av.sprayDots.push(dot);
+  }
+  while (av.sprayDots.length > 150) av.sprayDots.shift().removeFromParent();
+}
+
 function clearAvatarPaint(av) {
   for (const d of av.dots) d.removeFromParent();
+  for (const d of av.sprayDots) d.removeFromParent();
   av.dots.length = 0;
+  av.sprayDots.length = 0;
 }
 
 // Splatted players go limp: a ragdoll starts from the current pose and gets pushed
@@ -1109,7 +1134,8 @@ function handle(m) {
         sfx.hurt();
         sfx.splat([me.p[0], me.p[1] + 1.2, me.p[2]]);
       } else if (hitAv) {
-        paintAvatar(hitAv, m.off, m.c, m.s);
+        if (m.g) sprayAvatar(hitAv, m.dir, m.c, m.s);
+        else paintAvatar(hitAv, m.off, m.c, m.s);
         sfx.splat(hitAv.group.position.toArray());
         const at = hitAv.group.position.clone().add(new THREE.Vector3(...m.off));
         if (m.dir) hitAv.lastHit = { point: at.clone(), dir: new THREE.Vector3(...m.dir), time: performance.now() };
