@@ -3,6 +3,7 @@
 
 import * as THREE from 'three';
 import { PALETTE } from '/shared/game.js';
+import { rankIcon } from '/shared/progression.js';
 import { createCharacter, poseCharacter, setAnim, funClipNames, headPosition, placeLabel } from './characters.js';
 
 const CROWN = '<svg class="crown" viewBox="0 0 24 16" aria-hidden="true"><path d="M2 14 L0 3 L7 8 L12 0 L17 8 L24 3 L22 14 Z"/></svg>';
@@ -65,7 +66,9 @@ export function createLobby(renderer, labelsEl, panelWidth) {
       const color = new THREE.Color(PALETTE[p.color]);
       e.body.color.copy(color);
       e.label.style.setProperty('--c', PALETTE[p.color]);
-      e.label.innerHTML = `${p.id === leaderId ? CROWN : ''}<span>${esc(p.name)}</span>${p.id === meId ? '<em>you</em>' : ''}`;
+      // registered players show their level and rank insignia
+      const level = p.level ? `<img class="rank" src="${rankIcon(p.level)}" alt=""><b class="lvl">${p.level}</b>` : '';
+      e.label.innerHTML = `${p.id === leaderId ? CROWN : ''}${level}<span>${esc(p.name)}</span>${p.id === meId ? '<em>you</em>' : ''}`;
       e.index = i;
     });
     // Stand in a gentle arc, facing the camera.

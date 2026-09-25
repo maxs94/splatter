@@ -4,6 +4,8 @@ import { initAudio, play, tone, updateListener, getVolume, setVolume } from './j
 import { assetsReady, createCharacter, cloneGun, locomotion, poseCharacter, setAnim } from './js/characters.js';
 import { createLobby } from './js/lobby.js';
 import { createViewer } from './js/viewer.js';
+import { createHome } from './js/home.js';
+import { levelInfo, rankIcon, MAX_LEVEL } from '/shared/progression.js';
 import { createPaintFlow, SIM_PPM } from './js/paintflow.js';
 import { createBlitter } from './js/blit.js';
 import { createSurfaces } from './js/surfaces.js';
@@ -512,7 +514,7 @@ const whiteMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
 const DEBUG = new URLSearchParams(location.search).has('debug');
 const avatarMat = DEBUG ? new THREE.MeshNormalMaterial() : whiteMat;
 // Hooks for testing from the browser console with ?debug.
-if (DEBUG) window.splatter = { get me() { return me; }, avatars: () => avatars, paintSplat: (sp, mode) => paintSplat(sp, mode), trackSteps, makeWalker, flows: () => paintFlow.flows, updateFlows: dt => paintFlow.update(dt), updateFootprints, fluid: () => fluid, spawnProjectile: (...a) => spawnProjectile(...a), viewer: () => viewer };
+if (DEBUG) window.splatter = { get me() { return me; }, handle: m => handle(m), avatars: () => avatars, paintSplat: (sp, mode) => paintSplat(sp, mode), trackSteps, makeWalker, flows: () => paintFlow.flows, updateFlows: dt => paintFlow.update(dt), updateFootprints, fluid: () => fluid, spawnProjectile: (...a) => spawnProjectile(...a), viewer: () => viewer };
 const colorMats = PALETTE.map(hex => new THREE.MeshBasicMaterial({ color: hex }));
 const dotGeo = new THREE.SphereGeometry(1, 10, 8);
 
@@ -600,7 +602,7 @@ let roomsState = { rooms: [], max: 10 };
 
 let ws = null;
 let leaving = false;
-let screen = 'menu'; // menu | browser | lobby | viewer | game
+let screen = 'menu'; // menu | home | browser | lobby | viewer | game
 // In a room (lobby or match), as opposed to the lobby browser. Messages of a room we
 // just left can still arrive; they are ignored while this is false.
 let inRoom = false;
@@ -609,10 +611,22 @@ let joining = false;
 
 const lobby = createLobby(renderer, $('labels'), 420);
 const viewer = createViewer(renderer, $('labels'));
+// The logged-in main menu needs the player model, so it is made once that has loaded.
+let home = null;
+let menuColor = 0;
+assetsReady.then(() => { home = createHome(renderer); home.setColor(menuColor); }).catch(() => {});
+
+// The menu players return to: the main menu when logged in, the start card otherwise.
+const menuScreen = () => (account.user ? 'home' : 'menu');
+function setMenuError(text) {
+  $('menuError').textContent = text;
+  $('homeError').textContent = text;
+}
 
 function showScreen(name) {
   screen = name;
   $('menu').hidden = name !== 'menu';
+  $('home').hidden = name !== 'home';
   $('browser').hidden = name !== 'browser';
   $('lobbyUi').hidden = name !== 'lobby';
   $('viewerUi').hidden = name !== 'viewer';
@@ -970,12 +984,12 @@ const clientId = (() => {
 })();
 let closeMessage = '';
 
-function connect(name, color) {
+function connect(name, color, token) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   leaving = false;
   closeMessage = '';
   ws = new WebSocket(`${proto}://${location.host}`);
-  ws.onopen = () => send({ t: 'hello', name, color, cid: clientId });
+  ws.onopen = () => send({ t: 'hello', name, color, cid: clientId, token });
   ws.onmessage = e => {
     const t = performance.now();
     const m = JSON.parse(e.data);
@@ -986,11 +1000,12 @@ function connect(name, color) {
     inRoom = false;
     joining = false;
     clearMatch();
-    showScreen('menu');
-    $('play').disabled = false;
-    $('menuError').textContent = closeMessage || (leaving ? '' : 'Disconnected from server.');
+    if (menuScreen() === 'home') { home?.dance(); renderLevel(); }
+    showScreen(menuScreen());
+    $('play').disabled = $('homePlay').disabled = false;
+    setMenuError(closeMessage || (leaving ? '' : 'Disconnected from server.'));
   };
-  ws.onerror = () => { $('menuError').textContent = 'Could not reach the server.'; };
+  ws.onerror = () => setMenuError('Could not reach the server.');
 }
 
 function leave() {
@@ -1016,7 +1031,9 @@ window.addEventListener('pagehide', () => {
 
 function enterGame(m) {
   perf.reset();
-  perf.meta = { name: roster.get(me.id)?.name ?? $('name').value, joinedPhase: m.round.state };
+  matchXp = 0;
+  matchStartXp = account.user?.xp ?? 0;
+  perf.meta = { name: roster.get(me.id)?.name ?? me.name, joinedPhase: m.round.state };
   clearMatch();
   for (const p of m.players) addRoster(p);
   clearPaint();
@@ -1040,19 +1057,27 @@ function enterGame(m) {
   }
 }
 
-const OUTSIDE_ROOM = new Set(['kicked', 'rooms', 'joinFailed', 'welcome']);
+const OUTSIDE_ROOM = new Set(['kicked', 'helloFailed', 'rooms', 'joinFailed', 'welcome']);
 
 function handle(m) {
   if (!inRoom && !OUTSIDE_ROOM.has(m.t)) return;
   switch (m.t) {
     case 'kicked':
-      closeMessage = 'You joined from another tab or window.';
+      closeMessage = m.reason === 'account' ? 'You logged in somewhere else.' : 'You joined from another tab or window.';
+      leaving = true;
+      break;
+    case 'helloFailed':
+      closeMessage = m.reason === 'registered'
+        ? 'That name belongs to a registered player. Log in, or pick another name.'
+        : 'Your login has expired, please log in again.';
+      if (m.reason === 'session') accountExpired();
       leaving = true;
       break;
     case 'rooms':
       roomsState = m;
-      if (screen === 'menu') {
-        $('play').disabled = false;
+      if (screen === 'menu' || screen === 'home') {
+        $('play').disabled = $('homePlay').disabled = false;
+        $('browserBack').textContent = account.user ? 'Back to menu' : 'Change name or color';
         showScreen('browser');
       }
       renderBrowser();
@@ -1161,6 +1186,18 @@ function handle(m) {
         fluid.splash(at.toArray(), out, paintColors[m.c], { count: 10, speed: 2.6, size: 0.08, life: 0.5 });
       }
       if (m.owner === me.id) { hitMarker(false, m.z === 'a' || m.z === 'l'); sfx.hit(); }
+      break;
+    }
+    case 'xp': {
+      const before = levelInfo(account.user?.xp ?? 0).level;
+      if (account.user) account.user.xp = m.xp;
+      matchXp += m.amount;
+      if (screen === 'game') xpPop(m.amount, m.reason);
+      const after = levelInfo(m.xp).level;
+      if (after > before) {
+        toast(`Level up! Level ${after}`);
+        sfx.kill();
+      }
       break;
     }
     case 'hp':
@@ -1279,6 +1316,7 @@ function renderLobby() {
     <li>
       <span class="dot" style="background:${PALETTE[p.color]}"></span>
       ${p.id === leader ? CROWN : ''}
+      ${p.level ? `<img class="rank" src="${rankIcon(p.level)}" alt=""><b class="lvl">${p.level}</b>` : ''}
       <span>${esc(p.name)}</span>
       ${p.id === me.id ? '<span class="tag">you</span>' : ''}
     </li>`).join('');
@@ -1336,7 +1374,7 @@ $('leaveLobby').addEventListener('click', leaveRoom);
 
 function renderBrowser() {
   const { rooms, max } = roomsState;
-  const name = $('name').value.trim() || 'Player';
+  const name = me.name || 'Player';
   $('browserMe').innerHTML = `<span class="dot" style="background:${PALETTE[me.color]}"></span>${esc(name)}`;
   $('roomName').placeholder = `${name}'s game`;
   $('browserStatus').textContent = rooms.length
@@ -1600,7 +1638,15 @@ function showRoundEnd(scores) {
   const top = scores[0];
   const tie = scores.length > 1 && scores[1].kills === top?.kills;
   const title = !top ? 'Round over' : tie ? 'Draw!' : `${esc(top.name)} wins!`;
-  $('roundEnd').innerHTML = `<h2>${title}</h2><p class="sub" id="nextRound"></p>${scoreTable(scores)}`;
+  // what a registered player earned this match, and their level now
+  let xp = '';
+  if (account.user) {
+    const li = levelInfo(account.user.xp), up = li.level > levelInfo(matchStartXp).level;
+    xp = `<div class="xp-summary"><img class="rank" src="${rankIcon(li.level)}" alt="">
+      <span><b>+${fmt(matchXp)} XP</b> · Level ${li.level}${up ? ' <em>Level up!</em>' : ''}</span>
+      <div class="xp-bar"><i style="width:${li.need ? (li.into / li.need) * 100 : 100}%"></i></div></div>`;
+  }
+  $('roundEnd').innerHTML = `<h2>${title}</h2><p class="sub" id="nextRound"></p>${xp}${scoreTable(scores)}`;
   $('roundEnd').hidden = false;
   firing = false;
 }
@@ -1733,25 +1779,101 @@ document.addEventListener('pointerlockchange', () => {
   if (!locked()) { firing = false; if (buy.open) openBuyMenu(false); }
 });
 
-// ---------------------------------------------------------------- Pause menu (Esc)
+// ---------------------------------------------------------------- Settings
+
+// Sound volume and inverted look, set in the Esc menu or the main menu's settings. Kept in
+// the browser, and with the account while logged in (applied again at every login).
+function setInvertY(v) {
+  invertY = v;
+  try { localStorage.setItem('splatter-invert-y', v ? '1' : '0'); } catch {}
+}
+function syncSettingsUi() {
+  for (const [slider, label] of [[$('volume'), $('volumeValue')], [$('setVolume'), $('setVolumeValue')]]) {
+    slider.value = Math.round(getVolume() * 100);
+    label.textContent = `${slider.value}%`;
+  }
+  $('invertY').checked = $('setInvertY').checked = invertY;
+}
+let saveSettingsTimer = 0;
+function settingsChanged() {
+  syncSettingsUi();
+  if (!account.user) return;
+  account.user.settings = { volume: getVolume(), invertY };
+  clearTimeout(saveSettingsTimer);
+  saveSettingsTimer = setTimeout(() => api('/api/settings', account.user.settings).catch(() => {}), 500);
+}
+function applyAccountSettings(s = {}) {
+  // an account without saved settings takes this browser's
+  if (!Number.isFinite(s.volume) && typeof s.invertY !== 'boolean') return settingsChanged();
+  if (Number.isFinite(s.volume)) setVolume(s.volume);
+  if (typeof s.invertY === 'boolean') setInvertY(s.invertY);
+  syncSettingsUi();
+}
 
 {
-  const slider = $('volume');
-  const show = () => { $('volumeValue').textContent = `${slider.value}%`; };
-  slider.value = Math.round(getVolume() * 100);
-  show();
-  slider.addEventListener('input', () => { setVolume(slider.value / 100); show(); });
-  slider.addEventListener('change', () => { initAudio(); sfx.shoot(); });
-  $('invertY').checked = invertY;
-  $('invertY').addEventListener('change', e => {
-    invertY = e.target.checked;
-    try { localStorage.setItem('splatter-invert-y', invertY ? '1' : '0'); } catch {}
-  });
+  for (const id of ['volume', 'setVolume']) {
+    $(id).addEventListener('input', e => { setVolume(e.target.value / 100); settingsChanged(); });
+    $(id).addEventListener('change', () => { initAudio(); sfx.shoot(); });
+  }
+  for (const id of ['invertY', 'setInvertY']) {
+    $(id).addEventListener('change', e => { setInvertY(e.target.checked); settingsChanged(); });
+  }
+  syncSettingsUi();
   $('resume').addEventListener('click', () => { initAudio(); lockPointer(); });
   $('leaveMatch').addEventListener('click', leaveRoom);
+  const closeSettings = () => { $('settingsMenu').hidden = true; };
+  $('homeSettings').addEventListener('click', () => { syncSettingsUi(); $('settingsMenu').hidden = false; });
+  $('settingsDone').addEventListener('click', closeSettings);
+  $('settingsMenu').addEventListener('click', e => { if (e.target.id === 'settingsMenu') closeSettings(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSettings(); });
+}
+
+// ---------------------------------------------------------------- Experience
+
+const fmt = n => Math.round(n).toLocaleString('en-US');
+let matchXp = 0;        // earned in the current match
+let matchStartXp = 0;   // account XP when the match started
+
+// Level, rank insignia and the bar to the next level under the name in the main menu.
+function renderLevel() {
+  const xp = account.user?.xp ?? 0;
+  const li = levelInfo(xp);
+  $('homeRank').src = rankIcon(li.level);
+  $('homeLevel').textContent = li.level;
+  $('homeNext').textContent = li.level >= MAX_LEVEL ? '' : li.level + 1;
+  $('homeXpFill').style.width = `${li.need ? (li.into / li.need) * 100 : 100}%`;
+  $('homeXpText').textContent = li.need
+    ? `${fmt(li.into)} / ${fmt(li.need)} XP · ${fmt(li.toNext)} XP to level ${li.level + 1}`
+    : `${fmt(xp)} XP · highest level`;
+}
+
+// "+100 Splat" under the crosshair, like the score popups in Modern Warfare.
+function xpPop(amount, reason) {
+  const el = document.createElement('div');
+  el.className = 'xp-pop';
+  el.innerHTML = `<b>+${fmt(amount)}</b> ${esc(reason)}`;
+  $('xpPops').appendChild(el);
+  while ($('xpPops').children.length > 5) $('xpPops').firstChild.remove();
+  setTimeout(() => el.remove(), 1800);
 }
 
 // ---------------------------------------------------------------- Menu
+
+// Guests pick a name each time. Registered players log in with username and password;
+// the token the server hands out is kept in the browser and sent with the hello.
+const account = { token: null, user: null };
+let accountExpired = () => {};
+
+async function api(path, body) {
+  const res = await fetch(path, {
+    method: body ? 'POST' : 'GET',
+    headers: { 'Content-Type': 'application/json', ...(account.token ? { Authorization: `Bearer ${account.token}` } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(data.error || 'Something went wrong.'), { status: res.status });
+  return data;
+}
 
 {
   let saved = {};
@@ -1761,39 +1883,157 @@ document.addEventListener('pointerlockchange', () => {
 
   $('logo').innerHTML = [...'SPLATTER'].map((ch, i) => `<span style="color:${PALETTE[(i * 3) % PALETTE.length]}">${ch}</span>`).join('');
 
-  const pal = $('palette');
-  PALETTE.forEach((hex, i) => {
-    const b = document.createElement('button');
-    b.style.background = hex;
-    b.title = hex;
-    b.addEventListener('click', () => {
-      color = i;
-      [...pal.children].forEach((el, j) => el.classList.toggle('sel', j === i));
+  // The same colors on the start card and in the main menu, where the player's
+  // character shows the pick right away.
+  const palettes = [$('palette'), $('homePalette')];
+  let saveColorTimer = 0;
+  const pickColor = (i, save = false) => {
+    color = menuColor = i;
+    // a logged-in player's pick is kept with the account right away
+    if (save && account.user && account.user.color !== i) {
+      account.user.color = i;
+      clearTimeout(saveColorTimer);
+      saveColorTimer = setTimeout(() => api('/api/color', { color: i }).catch(() => {}), 400);
+    }
+    for (const pal of palettes) [...pal.children].forEach((el, j) => el.classList.toggle('sel', j === i));
+    $('homeDot').style.background = PALETTE[i];
+    home?.setColor(i);
+  };
+  for (const pal of palettes) {
+    PALETTE.forEach((hex, i) => {
+      const b = document.createElement('button');
+      b.style.background = hex;
+      b.title = hex;
+      b.addEventListener('click', () => pickColor(i, true));
+      pal.appendChild(b);
     });
-    pal.appendChild(b);
-  });
-  pal.children[color].classList.add('sel');
+  }
+  pickColor(color);
 
-  assetsReady.catch(() => { $('menuError').textContent = 'Could not load the player model.'; });
+  // Start card views: guest | login | register (tabs), reset (admin form). Logged-in
+  // players get the main menu screen instead.
+  let view = 'guest';
+  const setView = (v, message = '') => {
+    view = v;
+    const auth = v === 'login' || v === 'register';
+    $('authTabs').hidden = v === 'reset';
+    for (const b of $('authTabs').children) b.classList.toggle('sel', b.dataset.view === v);
+    $('nameRow').hidden = v !== 'guest';
+    $('authForm').hidden = !auth;
+    $('resetForm').hidden = v !== 'reset';
+    $('paintRow').hidden = v !== 'guest';
+    $('confirmRow').hidden = v !== 'register';
+    $('authSubmit').textContent = v === 'register' ? 'Register' : 'Log in';
+    $('authPass').autocomplete = v === 'register' ? 'new-password' : 'current-password';
+    $('openReset').hidden = v !== 'login';
+    $('menuNote').textContent = message;
+    $('menuError').textContent = '';
+  };
+  const showHome = () => {
+    $('homeName').textContent = account.user ? account.user.username : '…';
+    renderLevel();
+    $('homeError').textContent = '';
+    home?.dance();
+    showScreen('home');
+  };
+  for (const b of $('authTabs').children) b.addEventListener('click', () => setView(b.dataset.view));
+
+  const saveToken = token => {
+    account.token = token;
+    try { token ? localStorage.setItem('splatter-session', token) : localStorage.removeItem('splatter-session'); } catch {}
+  };
+  const loggedIn = ({ token, user }) => {
+    saveToken(token);
+    account.user = user;
+    pickColor(user.color < PALETTE.length ? user.color : color);
+    applyAccountSettings(user.settings);
+    for (const id of ['authPass', 'authConfirm']) $(id).value = '';
+    showHome();
+  };
+  accountExpired = () => {
+    saveToken(null);
+    account.user = null;
+    setView('login');
+    showScreen('menu');
+  };
+
+  // A login kept from an earlier visit.
+  try { account.token = localStorage.getItem('splatter-session'); } catch {}
+  setView('guest');
+  if (account.token) {
+    showHome();
+    api('/api/me')
+      .then(({ user }) => loggedIn({ token: account.token, user }))
+      .catch(e => { if (e.status === 401) accountExpired(); else showScreen('menu'); });
+  }
+
+  $('authForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const body = { username: $('authUser').value.trim(), password: $('authPass').value };
+    if (view === 'register') Object.assign(body, { confirm: $('authConfirm').value, color });
+    $('authSubmit').disabled = true;
+    try {
+      loggedIn(await api(view === 'register' ? '/api/register' : '/api/login', body));
+    } catch (err) {
+      $('menuError').textContent = err.message;
+    } finally {
+      $('authSubmit').disabled = false;
+    }
+  });
+  $('homeLogout').addEventListener('click', () => {
+    api('/api/logout', {}).catch(() => {});
+    saveToken(null);
+    account.user = null;
+    setView('guest');
+    showScreen('menu');
+  });
+  $('openReset').addEventListener('click', () => {
+    $('resetUser').value = $('authUser').value.trim();
+    setView('reset');
+  });
+  $('closeReset').addEventListener('click', () => setView('login'));
+  $('resetForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    try {
+      const { username } = await api('/api/reset-password', {
+        admin: $('resetAdmin').value, username: $('resetUser').value.trim(),
+        password: $('resetPass').value, confirm: $('resetConfirm').value,
+      });
+      for (const id of ['resetAdmin', 'resetPass', 'resetConfirm']) $(id).value = '';
+      $('authUser').value = username;
+      setView('login', `New password set for ${username}. They can log in with it now.`);
+    } catch (err) {
+      $('menuError').textContent = err.message;
+    }
+  });
+
+  assetsReady.catch(() => setMenuError('Could not load the player model.'));
 
   const join = async () => {
-    const name = $('name').value.trim();
-    try { localStorage.setItem('splatter', JSON.stringify({ name, color })); } catch {}
+    const name = account.user ? account.user.username : $('name').value.trim();
+    if (!account.user) {
+      try { localStorage.setItem('splatter', JSON.stringify({ name, color })); } catch {}
+    } else {
+      account.user.color = color;
+    }
+    me.name = name;
     me.color = color;
-    $('menuError').textContent = '';
-    $('play').disabled = true;
+    setMenuError('');
+    $('menuNote').textContent = '';
+    $('play').disabled = $('homePlay').disabled = true;
     initAudio();
     try {
       await assetsReady;
     } catch {
-      $('play').disabled = false;
+      $('play').disabled = $('homePlay').disabled = false;
       return;
     }
     setupViewGun();
     setGunColor(color);
-    connect(name, color);
+    connect(name, color, account.user ? account.token : undefined);
   };
   $('play').addEventListener('click', join);
+  $('homePlay').addEventListener('click', join);
   $('name').addEventListener('keydown', e => { if (e.key === 'Enter') join(); });
 }
 
@@ -1909,5 +2149,6 @@ renderer.setAnimationLoop(() => {
 
   if (screen === 'game') gameFrame(now, dt);
   else if (screen === 'lobby') lobby.render(dt);
+  else if (screen === 'home' && home) home.render(dt);
   else if (screen === 'viewer') viewer.render(dt);
 });

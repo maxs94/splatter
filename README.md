@@ -45,7 +45,8 @@ can see (more the closer they are). Guns and the grenade are defined in `WEAPONS
 
 ## Match flow
 
-1. Pick a name and a paint color, then **Find a game**.
+1. Play as a **Guest** (pick a name and a paint color), or **Log in** / **Register**
+   (see [Accounts](#accounts)), then **Find a game**.
 2. The lobby browser lists every open lobby with its name, how many of the 10 player slots
    are taken, whether bots are on and whether a match is running. Join one, or create your
    own lobby and give it a name. Every lobby plays its own match, so several groups can
@@ -62,6 +63,57 @@ can see (more the closer they are). Guns and the grenade are defined in `WEAPONS
 
 With `?debug` in the URL, the **Animation viewer** button in the lobby opens a debug scene with the player model
 looping every animation and the in-game combinations (gun pose, strafing, aiming).
+
+## Accounts
+
+Guests pick any name that no registered player owns. Registering takes a username
+(3 to 16 characters), a password (8 or more) and the password again; there is no email.
+Registered players always play under their username. After logging in they get a main
+menu: their character dances one of the lobby loops (a new one each time) in front of a wall that paint shots keep splatting, with the
+name at the top left, a logout button at the top right and **Find a game** and the colors
+at the bottom. The character takes on the picked color right away, and the color is saved
+with the account (`public/js/home.js`). The gear next to the logout button opens the
+settings (sound volume, inverted mouse look); like the Esc menu in a match, changes are
+saved with the account and applied again at the next login. The browser stays logged in
+(for 180 days without playing), and logging in from another browser replaces the older
+connection. After 10 wrong passwords for a username within 15 minutes, logins for it
+pause until the 15 minutes are over.
+
+Forgotten passwords: under **Log in > Forgot your password?** an admin enters the
+`ADMIN_PASSWORD` from the server's environment, the username and a new password. That
+also logs the player out everywhere. The reset only works when `ADMIN_PASSWORD` has at
+least 32 characters (for example `openssl rand -base64 48`).
+
+Accounts live in a SQLite database (`node:sqlite`, built into Node 22.5+) at `DB_PATH`
+(default `data/splatter.db`; `docker compose` keeps it in `./data`). Passwords are hashed
+with scrypt, and the server only keeps a hash of each login token.
+
+## Experience and levels
+
+Registered players earn experience (XP) and level up, modeled on Call of Duty: Modern
+Warfare (2019); guests earn none. As in Modern Warfare, the score a player makes during a
+match is XP, medals add to it, and a match bonus comes at the end:
+
+| Event | XP |
+| --- | --- |
+| Splat | 100 |
+| Assist (hit the player within 10 s before someone else splatted them) | 25 |
+| First Blood, Revenge, Headshot (hit on the top of the body), Longshot (30 m or more) | +50 each |
+| Double Splat / Triple Splat / Multi Splat (splats within 4 s of each other) | +50 / +100 / +150 |
+| Splat streak (every 5 splats without being splatted) | +100 |
+| Match bonus (only for players still there at the end) | 3 per second played, x1.5 for the top 3 |
+
+XP is saved to the account as it is earned, so leaving early keeps what was earned but not
+the match bonus. Levels 1 to 55 (like Modern Warfare's enlisted ranks) cost a bit more each:
+800 XP for level 2 and 130 more for every level after it, about 229,000 XP in total, roughly
+90 matches. Levels 56 to 155 (like the officer / season levels) cost 8,000 XP each. Numbers
+and formulas are in `shared/progression.js`.
+
+In a match, earned XP pops up under the crosshair, the results show the XP of the match and
+any level up. In the lobby, registered players show their level and rank insignia; the main
+menu shows the insignia, the level and a bar with the XP to the next level. The 16 insignia
+(one per 5 enlisted levels, one per 20 officer levels) were made with OpenArt
+(`assets/ranks-sheet.png`, cut into `public/ranks/`).
 
 ## Run
 
@@ -155,6 +207,8 @@ matched with the other.
   By default there is one thread per CPU minus one (the main thread handles the network);
   `WORKERS` sets a fixed number. A new lobby goes to the thread with the fewest lobbies,
   and each thread advances its lobbies at 60 Hz.
+- `accounts.js` keeps the registered players (SQLite) and serves the `/api/...` endpoints
+  for registering, logging in and out and the admin password reset.
 - `room.js` is one lobby and its authoritative match: it simulates every paint blob against
   the level and the players, applies damage, handles kills, respawns, rounds and bots, and
   keeps a list of splats for players who join late.
