@@ -32,6 +32,7 @@
     <div id="centerMsg"></div>
     <div id="countdown"></div>
     <div id="toast"></div>
+    <div id="xpPops"></div>
   </div>
 
   <div id="scoreboard" class="panel" hidden></div>
@@ -103,14 +104,80 @@
     <span>Drag to orbit, right-drag to pan, scroll to zoom</span>
   </div>
 
+  <!-- Main menu of a logged-in player, over the paint scene (js/home.js) -->
+  <div id="home" hidden>
+    <div class="home-id">
+      <div class="home-name"><img id="homeRank" class="rank" alt=""><span id="homeName"></span><span id="homeDot" class="dot"></span></div>
+      <!-- level progress, like the rank bar in Modern Warfare -->
+      <div class="home-xp">
+        <b id="homeLevel" class="lvl-now">1</b>
+        <div class="xp-bar"><i id="homeXpFill"></i></div>
+        <b id="homeNext" class="lvl-next">2</b>
+      </div>
+      <p id="homeXpText" class="xp-text"></p>
+    </div>
+    <div class="home-actions">
+      <button id="homeSettings" class="icon-btn" type="button" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v2.6M12 18.6v2.6M21.2 12h-2.6M5.4 12H2.8M18.5 5.5l-1.8 1.8M7.3 16.7l-1.8 1.8M18.5 18.5l-1.8-1.8M7.3 7.3L5.5 5.5"/><circle cx="12" cy="12" r="6.4"/></svg>
+      </button>
+      <button id="homeLogout" class="icon-btn" type="button" title="Log out" aria-label="Log out">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 4H5v16h5"/><path d="M14 7.5l4.5 4.5-4.5 4.5M18.5 12H9"/></svg>
+      </button>
+    </div>
+    <div class="home-bottom">
+      <p id="homeError"></p>
+      <button id="homePlay">Find a game</button>
+      <div id="homePalette" aria-label="Paint color"></div>
+    </div>
+  </div>
+
+  <!-- Settings from the main menu; saved with the account -->
+  <div id="settingsMenu" hidden>
+    <div class="panel pause-card">
+      <h2>Settings</h2>
+      <label class="slider">
+        <span class="slider-head">Sound effects <b id="setVolumeValue">80%</b></span>
+        <input id="setVolume" type="range" min="0" max="100" step="1">
+      </label>
+      <label class="toggle setting"><input type="checkbox" id="setInvertY"> Invert mouse Y axis</label>
+      <div class="buttons"><button id="settingsDone" class="btn primary">Done</button></div>
+    </div>
+  </div>
+
   <div id="menu">
     <div class="menu-card">
       <h1 id="logo">SPLATTER</h1>
       <p class="tagline">Everything is white. Everyone is white.<br>Paint the world to see it.</p>
-      <label>Name <input id="name" maxlength="16" autocomplete="off" spellcheck="false" placeholder="Your name"></label>
-      <div class="label">Paint</div>
-      <div id="palette"></div>
-      <button id="play">Find a game</button>
+      <div id="authTabs" class="tabs" role="tablist">
+        <button data-view="guest" role="tab">Guest</button>
+        <button data-view="login" role="tab">Log in</button>
+        <button data-view="register" role="tab">Register</button>
+      </div>
+      <label id="nameRow">Name <input id="name" maxlength="16" autocomplete="off" spellcheck="false" placeholder="Your name"></label>
+      <form id="authForm" class="auth">
+        <label>Username <input id="authUser" maxlength="16" autocomplete="username" spellcheck="false"></label>
+        <label>Password <input id="authPass" type="password" autocomplete="current-password"></label>
+        <label id="confirmRow">Confirm password <input id="authConfirm" type="password" autocomplete="new-password"></label>
+        <button id="authSubmit" class="btn primary big" type="submit">Log in</button>
+        <button id="openReset" class="link" type="button">Forgot your password? An admin can reset it.</button>
+      </form>
+      <form id="resetForm" class="auth">
+        <p class="note">Only the server admin can do this, with the admin password.</p>
+        <label>Admin password <input id="resetAdmin" type="password" autocomplete="off"></label>
+        <label>Username <input id="resetUser" maxlength="16" autocomplete="off" spellcheck="false"></label>
+        <label>New password <input id="resetPass" type="password" autocomplete="new-password"></label>
+        <label>Confirm new password <input id="resetConfirm" type="password" autocomplete="new-password"></label>
+        <div class="buttons">
+          <button class="btn primary" type="submit">Set password</button>
+          <button id="closeReset" class="btn" type="button">Back</button>
+        </div>
+      </form>
+      <div id="paintRow">
+        <div class="label">Paint</div>
+        <div id="palette"></div>
+        <button id="play">Find a game</button>
+      </div>
+      <p id="menuNote"></p>
       <p id="menuError"></p>
       <div class="controls">
         <span><b>WASD</b> move</span>

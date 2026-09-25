@@ -16,6 +16,7 @@ prepare();
 // current tick or message is handled: [room id, data, [connection ids]].
 let outbox = [];
 const changed = new Set(); // rooms whose lobby browser summary changed
+let xp = []; // [account id, amount] earned by registered players, saved by the main thread
 let flushQueued = false;
 
 function queueFlush() {
@@ -29,8 +30,9 @@ function flush() {
   const summaries = [];
   for (const id of changed) if (rooms.has(id)) summaries.push(rooms.get(id).room.summary());
   changed.clear();
-  if (outbox.length || summaries.length) parentPort.postMessage({ t: 'out', out: outbox, summaries });
+  if (outbox.length || summaries.length || xp.length) parentPort.postMessage({ t: 'out', out: outbox, summaries, xp });
   outbox = [];
+  xp = [];
 }
 
 // Stands in for a player's WebSocket inside the room. A broadcast sends the same data
@@ -58,6 +60,7 @@ const totals = () => {
 function hooks(id) {
   return {
     changed: () => { changed.add(id); queueFlush(); },
+    xp: (userId, amount) => { xp.push([userId, amount]); queueFlush(); },
     matchStart: () => { if (runningMatches++ === 0) prof.matchStart(totals()); },
     matchEnd: reason => { if (--runningMatches === 0) prof.matchEnd(reason, totals()); },
   };
@@ -70,7 +73,7 @@ parentPort.on('message', async msg => {
       rooms.set(msg.room, { room: new Room(msg.room, msg.name, msg.bots, hooks(msg.room)), players: new Map() });
       break;
     case 'join':
-      if (e) e.players.set(msg.conn, e.room.addHuman(connection(msg.room, msg.conn), msg.name, msg.color, msg.cid));
+      if (e) e.players.set(msg.conn, e.room.addHuman(connection(msg.room, msg.conn), msg.name, msg.color, msg.cid, msg.userId, msg.xp));
       break;
     case 'leave': {
       const p = e?.players.get(msg.conn);

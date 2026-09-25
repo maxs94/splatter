@@ -7,6 +7,7 @@ import {
 import { NavGraph } from './bots/nav.js';
 import { Bot, BOT_NAMES } from './bots/brain.js';
 import { prof } from './profiler.js';
+import { XP, ASSIST_WINDOW, MULTI_WINDOW, LONGSHOT_DISTANCE, levelInfo } from './shared/progression.js';
 
 // Bots fill the arena up to this many players while at least one human is connected.
 // A match holds at most this many players, humans and bots together.
@@ -39,7 +40,8 @@ export function send(ws, msg) {
 
 export class Room {
   // hooks: changed() when anything shown in the lobby browser changes,
-  // matchStart() / matchEnd(reason) around every match for the profiler.
+  // matchStart() / matchEnd(reason) around every match for the profiler,
+  // xp(accountId, amount) when a registered player earns experience.
   constructor(id, name, bots, hooks) {
     this.id = id;
     this.name = name;
@@ -82,6 +84,10 @@ export class Room {
       id, ws, name, color, p: this.pickSpawn(id), v: [0, 0, 0], onGround: false, crouch: false, yaw: 0, pitch: 0,
       hp: C.MAX_HP, alive: false, life: 0, kills: 0, deaths: 0, respawnAt: 0, lastShot: 0,
       lastDamage: 0, sentHp: C.MAX_HP, paintHits: 0, ready: false, bot: null,
+      // experience: account id and total XP of a registered player (guests earn none),
+      // plus what the medals need during a match
+      userId: null, xp: 0, matchFrom: null, streak: 0, multi: 0, multiUntil: 0,
+      lastKilledBy: null, damagers: new Map(),
     };
   }
 
@@ -98,7 +104,7 @@ export class Room {
   lobbyInfo() {
     return {
       t: 'lobby', name: this.name, phase: this.game.phase, leader: this.leaderId(),
-      players: this.humans().map(p => ({ id: p.id, name: p.name, color: p.color })),
+      players: this.humans().map(p => ({ id: p.id, name: p.name, color: p.color, level: p.userId ? levelInfo(p.xp).level : null })),
       settings: { ...this.settings, maxPlayers: MAX_PLAYERS },
     };
   }
@@ -143,17 +149,53 @@ export class Room {
     p.hp = p.sentHp = C.MAX_HP;
     p.alive = true;
     p.paintHits = 0;
+    p.damagers.clear();
     p.life++;
     if (p.bot) p.bot.onRespawn();
     this.broadcast({ t: 'respawn', id: p.id, p: p.p, life: p.life });
   }
 
-  kill(victim, killerId) {
+  // Experience for a registered player; the client shows it next to the crosshair.
+  award(p, amount, reason) {
+    if (!p.userId || amount <= 0) return;
+    p.xp += amount;
+    send(p.ws, { t: 'xp', amount, reason, xp: p.xp });
+    this.hooks.xp(p.userId, amount);
+  }
+
+  // XP for a splat, with Modern Warfare style medals on top. shot: { from, head }.
+  awardKill(killer, victim, shot) {
+    const now = Date.now();
+    this.award(killer, XP.SPLAT, 'Splat');
+    if (!this.firstBlood) { this.firstBlood = true; this.award(killer, XP.FIRST_BLOOD, 'First Blood'); }
+    if (killer.lastKilledBy === victim.id) { killer.lastKilledBy = null; this.award(killer, XP.REVENGE, 'Revenge'); }
+    if (shot?.head) this.award(killer, XP.HEADSHOT, 'Headshot');
+    if (shot?.from && Math.hypot(shot.from[0] - victim.p[0], shot.from[2] - victim.p[2]) >= LONGSHOT_DISTANCE) {
+      this.award(killer, XP.LONGSHOT, 'Longshot');
+    }
+    killer.multi = now < killer.multiUntil ? killer.multi + 1 : 1;
+    killer.multiUntil = now + MULTI_WINDOW * 1000;
+    if (killer.multi === 2) this.award(killer, XP.DOUBLE, 'Double Splat');
+    else if (killer.multi === 3) this.award(killer, XP.TRIPLE, 'Triple Splat');
+    else if (killer.multi >= 4) this.award(killer, XP.MULTI, 'Multi Splat');
+    killer.streak++;
+    if (killer.streak % 5 === 0) this.award(killer, XP.STREAK, `${killer.streak} Splat Streak`);
+    // everyone else who painted the victim recently gets an assist
+    for (const [id, at] of victim.damagers) {
+      const p = this.players.get(id);
+      if (p && p !== killer && now - at < ASSIST_WINDOW * 1000) this.award(p, XP.ASSIST, 'Assist');
+    }
+  }
+
+  kill(victim, killerId, shot) {
     victim.alive = false;
     victim.deaths++;
     victim.respawnAt = Date.now() + C.RESPAWN_TIME * 1000;
     const killer = this.players.get(killerId);
     if (killer) killer.kills++;
+    if (killer && killer !== victim) this.awardKill(killer, victim, shot);
+    victim.streak = 0;
+    victim.lastKilledBy = killerId;
     if (victim.bot) victim.bot.onDeath();
     for (const p of this.players.values()) if (p.bot) p.bot.forget(victim.id);
     this.broadcast({
@@ -178,8 +220,10 @@ export class Room {
   startMatch() {
     this.splats = [];
     this.projectiles.length = 0;
+    this.firstBlood = false;
     for (const p of this.players.values()) {
       p.kills = 0; p.deaths = 0; p.ready = false; p.alive = false;
+      p.matchFrom = null; p.streak = 0; p.multi = 0; p.lastKilledBy = null;
     }
     this.setPhase('loading', C.LOADING_TIMEOUT);
     this.broadcast({ t: 'start', ...this.matchState() });
@@ -225,7 +269,7 @@ export class Room {
     if (now - pl.lastShot < C.FIRE_INTERVAL * 1000 - 40) return null;
     pl.lastShot = now;
     const pr = {
-      id: nextProjectileId++, owner: pl.id, color: pl.color, born: now,
+      id: nextProjectileId++, owner: pl.id, color: pl.color, born: now, from: o.slice(),
       p: o.slice(), v: d.map(x => x * C.BLOB_SPEED),
     };
     this.projectiles.push(pr);
@@ -274,10 +318,13 @@ export class Room {
 
   // Adds a human (the server checked that the room has space) and returns the player.
   // ws is anything with send(data), readyState and OPEN.
-  addHuman(ws, name, color, cid) {
+  addHuman(ws, name, color, cid, userId = null, xp = 0) {
     const id = nextPlayerId++;
     const me = this.makePlayer(id, ws, name, color);
     me.cid = cid;
+    me.userId = userId;
+    me.xp = xp;
+    if (this.game.phase === 'playing') me.matchFrom = Date.now();
     this.players.set(id, me);
     const room = { id: this.id, name: this.name };
     if (this.inMatch()) {
@@ -379,6 +426,7 @@ export class Room {
         target.lastDamage = now;
         target.sentHp = Math.max(0, target.hp);
         target.paintHits++;
+        target.damagers.set(pr.owner, now);
         if (target.bot) target.bot.onHurt(players.get(pr.owner), pr.v);
         this.broadcast({
           t: 'hitp', id: pr.id, owner: pr.owner, target: target.id, c: pr.color, s: seed(),
@@ -386,7 +434,8 @@ export class Room {
           yaw: r3(target.yaw), hp: Math.max(0, target.hp),
           dir: pr.v.map(x => r3(x / C.BLOB_SPEED)), // for the ragdoll push
         });
-        if (target.hp <= 0) this.kill(target, pr.owner);
+        // a hit on the top of the body counts as a headshot
+        if (target.hp <= 0) this.kill(target, pr.owner, { from: pr.from, head: q[1] - target.p[1] >= playerHeight(target) * 0.8 });
       } else if (hit) {
         projectiles.splice(i, 1);
         const q = hitPoint(o, s, hit);
@@ -403,6 +452,7 @@ export class Room {
       if (game.phase === 'loading' && (this.humans().every(p => p.ready) || now >= game.until)) this.beginCountdown();
       else if (game.phase === 'countdown' && now >= game.until) {
         this.setPhase('playing', C.ROUND_TIME);
+        for (const p of this.humans()) p.matchFrom = now; // the match bonus counts from here
         this.broadcast({ t: 'round', round: this.roundInfo() });
       } else if (game.phase === 'ended' && now >= game.until) this.returnToLobby();
       return;
@@ -424,10 +474,24 @@ export class Room {
     }
 
     if (now >= game.until) {
+      this.matchBonus(now);
       this.setPhase('ended', C.INTERMISSION);
       projectiles.length = 0;
       this.broadcast({ t: 'round', round: this.roundInfo(), scores: this.scores() });
       this.endProfiling('match ended');
+    }
+  }
+
+  // Match bonus for everyone still here at the end: the time they played, more for the
+  // top 3 (a win in free for all, like in Modern Warfare).
+  matchBonus(now) {
+    const places = this.scores().map(s => s.id);
+    for (const p of this.humans()) {
+      if (p.matchFrom === null) continue;
+      const seconds = Math.min(C.ROUND_TIME, (now - p.matchFrom) / 1000);
+      if (seconds < 30) continue;
+      const top3 = places.indexOf(p.id) < 3;
+      this.award(p, Math.round(seconds * XP.MATCH_PER_SECOND * (top3 ? XP.TOP3_FACTOR : 1)), top3 ? 'Match Bonus (top 3)' : 'Match Bonus');
     }
   }
 

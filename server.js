@@ -8,6 +8,7 @@ import { WebSocketServer } from 'ws';
 import { CONFIG as C, PALETTE } from './shared/game.js';
 import { send, MAX_PLAYERS, DEFAULT_BOTS } from './room.js';
 import { prof } from './profiler.js';
+import * as accounts from './accounts.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
@@ -50,7 +51,68 @@ const MIME = {
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const SHARED_DIR = path.join(__dirname, 'shared');
 
+// Accounts API: JSON in, JSON out. The token from register / login goes in the
+// Authorization header here and in the WebSocket hello.
+const API = {
+  'POST /api/register': (body) => accounts.register(body),
+  'POST /api/login': (body) => accounts.login(body),
+  'POST /api/logout': (body, token) => { accounts.logout(token); return {}; },
+  'POST /api/reset-password': (body) => accounts.resetPassword(body),
+  // Sound and mouse settings, kept with the account.
+  'POST /api/settings': (body, token) => {
+    const user = accounts.userForToken(token);
+    if (!user) throw new accounts.AuthError('Not logged in.', 401);
+    return { settings: accounts.setSettings(user, body) };
+  },
+  // The color picked in the main menu, so the next login starts with it.
+  'POST /api/color': (body, token) => {
+    const user = accounts.userForToken(token);
+    if (!user) throw new accounts.AuthError('Not logged in.', 401);
+    if (!Number.isInteger(body.color) || body.color < 0 || body.color >= PALETTE.length) throw new accounts.AuthError('Unknown color.');
+    accounts.setColor(user, body.color);
+    return {};
+  },
+  'GET /api/me': (body, token) => {
+    const user = accounts.userForToken(token);
+    if (!user) throw new accounts.AuthError('Not logged in.', 401);
+    return { user: accounts.publicUser(user) };
+  },
+};
+
+function handleApi(req, res, fn) {
+  const reply = (status, data) => {
+    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify(data));
+  };
+  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || null;
+  const chunks = [];
+  let size = 0;
+  req.on('data', c => {
+    size += c.length;
+    if (size > 16 * 1024) { reply(413, { error: 'Too large.' }); req.destroy(); return; }
+    chunks.push(c);
+  });
+  req.on('end', async () => {
+    if (res.writableEnded) return;
+    let body = {};
+    try {
+      if (chunks.length) body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      if (!body || typeof body !== 'object') throw new Error();
+    } catch {
+      return reply(400, { error: 'Bad request.' });
+    }
+    try {
+      reply(200, await fn(body, token));
+    } catch (e) {
+      if (e instanceof accounts.AuthError) reply(e.status, { error: e.message });
+      else { console.error('API error:', e); reply(500, { error: 'Something went wrong.' }); }
+    }
+  });
+}
+
 const server = http.createServer((req, res) => {
+  const api = API[`${req.method} ${req.url}`];
+  if (api) return handleApi(req, res, api);
   // Browser profiles (?profile) are uploaded here and saved next to the server's.
   if (req.method === 'POST' && req.url === '/api/client-profile') {
     if (!prof.enabled) { res.writeHead(403); return res.end('profiling is off (PROFILE=1)'); }
@@ -147,6 +209,8 @@ function fromThread(th, msg) {
         if (c && c.room?.id === roomId && c.ws.readyState === c.ws.OPEN) c.ws.send(data);
       }
     }
+    // XP earned in matches goes straight into the accounts database.
+    for (const [userId, amount] of msg.xp) accounts.addXp(userId, amount);
     for (const s of msg.summaries) {
       const r = rooms.get(s.id);
       if (r) { r.summary = s; roomsDirty = true; }
@@ -203,7 +267,10 @@ function enterRoom(conn, room) {
   }
   conn.room = room;
   room.members.add(conn);
-  room.thread.worker.postMessage({ t: 'join', room: room.id, conn: conn.id, name: conn.name, color: conn.color, cid: conn.cid });
+  room.thread.worker.postMessage({
+    t: 'join', room: room.id, conn: conn.id, name: conn.name, color: conn.color, cid: conn.cid,
+    userId: conn.userId, xp: conn.userId ? accounts.getXp(conn.userId) : 0,
+  });
 }
 
 function leaveRoom(conn) {
@@ -232,8 +299,8 @@ function leaveRoom(conn) {
 const wss = new WebSocketServer({ server, maxPayload: 16 * 1024 });
 
 wss.on('connection', ws => {
-  // name, color and cid are set by 'hello'; room while in a room
-  const conn = { id: nextConnId++, ws, name: null, color: 0, cid: null, room: null };
+  // name, color, cid (and userId for registered players) are set by 'hello'; room while in a room
+  const conn = { id: nextConnId++, ws, name: null, color: 0, cid: null, userId: null, room: null };
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
 
@@ -256,9 +323,37 @@ wss.on('connection', ws => {
         }
       }
       conn.cid = cid;
-      conn.name = String(m.name ?? '').replace(/[^\p{L}\p{N} _\-.!?]/gu, '').trim().slice(0, 16) || `Player${conn.id}`;
       conn.color = Number.isInteger(m.color) && m.color >= 0 && m.color < PALETTE.length
         ? m.color : Math.floor(Math.random() * PALETTE.length);
+      if (m.token) {
+        // Registered player: plays under their username, keeps the color they pick.
+        const user = accounts.userForToken(m.token);
+        if (!user) {
+          send(ws, { t: 'helloFailed', reason: 'session' });
+          ws.close(4003, 'session');
+          return;
+        }
+        // One connection per account: logging in elsewhere replaces the older one.
+        for (const other of [...conns.values()]) {
+          if (other.userId !== user.id) continue;
+          send(other.ws, { t: 'kicked', reason: 'account' });
+          leaveRoom(other);
+          conns.delete(other.id);
+          other.ws.close(4001, 'replaced');
+        }
+        conn.userId = user.id;
+        conn.name = user.username;
+        if (user.color !== conn.color) accounts.setColor(user, conn.color);
+      } else {
+        conn.name = String(m.name ?? '').replace(accounts.NAME_CHARS, '').trim().slice(0, 16) || `Player${conn.id}`;
+        // Guests can't take a registered player's name.
+        if (accounts.isRegistered(conn.name)) {
+          send(ws, { t: 'helloFailed', reason: 'registered' });
+          ws.close(4003, 'registered');
+          conn.name = null;
+          return;
+        }
+      }
       conns.set(conn.id, conn);
       send(ws, roomList());
       return;
