@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { CONFIG as C, WEAPONS, GRENADE, DEFAULT_WEAPON, ECONOMY, PALETTE, LEVEL, movePlayer, stepProjectile, mulberry32, groundHeight, spawnYaw, eyeHeight, playerHeight } from '/shared/game.js';
+import { CONFIG as C, WEAPONS, GRENADE, DEFAULT_WEAPON, ECONOMY, SPREES, MULTI_KILLS, PALETTE, LEVEL, movePlayer, stepProjectile, mulberry32, groundHeight, spawnYaw, eyeHeight, playerHeight } from '/shared/game.js';
 import { initAudio, play, tone, updateListener, getVolume, setVolume } from './js/audio.js';
 import { assetsReady, createCharacter, cloneGun, locomotion, poseCharacter, setAnim } from './js/characters.js';
 import { createLobby } from './js/lobby.js';
@@ -560,7 +560,10 @@ const sfx = {
   hit: () => tone(1500, 1100, 0.05, 'square', 0.05),
   hurt: () => tone(240, 80, 0.25, 'sawtooth', 0.1),
   kill: () => { tone(500, 1000, 0.12, 'triangle', 0.14); setTimeout(() => tone(750, 1500, 0.16, 'triangle', 0.12), 90); },
+  announce: key => (key && play(key, { vol: 1.2, jitter: 0 })) || [0, 110, 220].forEach((d, i) =>
+    setTimeout(() => tone(440 * 1.26 ** i, 880 * 1.26 ** i, 0.18, 'triangle', 0.14), d)),
   headshot: () => {
+    if (play('headshot', { vol: 1.2, jitter: 0 })) return;
     tone(1800, 2400, 0.06, 'square', 0.08);
     setTimeout(() => tone(900, 1800, 0.14, 'triangle', 0.16), 60);
     setTimeout(() => tone(1350, 2700, 0.22, 'triangle', 0.13), 150);
@@ -1178,6 +1181,18 @@ function handle(m) {
         ? `${nameTag(m.killer)} <span class="hs">headshot</span> ${nameTag(m.victim)}`
         : `${nameTag(m.killer)} splatted ${nameTag(m.victim)}`)
         + (m.bounty ? ` <span class="bounty">+$${m.bounty}</span>` : ''));
+      if (m.fb) {
+        announce('First Blood', `by ${nameTag(m.killer)}`, 'firstblood');
+        feed(`<b>First blood</b> by ${nameTag(m.killer)}`);
+      }
+      if (m.mk) {
+        announce(MULTI_KILLS[m.mk].name, nameTag(m.killer), MULTI_KILLS[m.mk].sound);
+        feed(`${nameTag(m.killer)}: <b>${MULTI_KILLS[m.mk].name}</b>`);
+      }
+      if (m.sp) {
+        announce(SPREES[m.sp].name, `${nameTag(m.killer)} · ${m.sp} kills`, SPREES[m.sp].sound);
+        feed(`${nameTag(m.killer)} is <b>${SPREES[m.sp].name}</b>`);
+      }
       if (m.victim === me.id) {
         if (buy.open) openBuyMenu(false);
         me.alive = false;
@@ -1409,6 +1424,27 @@ function headshotBanner() {
   el.classList.remove('on');
   void el.offsetWidth; // restart the animation
   el.classList.add('on');
+}
+
+// Announcer banner (first blood, sprees, multi-kills) with its voice line. Announcements that
+// come together play one after the other instead of cutting each other off.
+const announcements = [];
+let announceTimer = 0;
+function announce(big, subHtml, sound) {
+  announcements.push({ big, subHtml, sound });
+  if (!announceTimer) nextAnnouncement();
+}
+function nextAnnouncement() {
+  const a = announcements.shift();
+  if (!a) { announceTimer = 0; return; }
+  const el = $('announce');
+  el.querySelector('.big').textContent = a.big;
+  el.querySelector('.sub').innerHTML = a.subHtml;
+  el.classList.remove('on');
+  void el.offsetWidth; // restart the animation
+  el.classList.add('on');
+  sfx.announce(a.sound);
+  announceTimer = setTimeout(nextAnnouncement, 1400);
 }
 
 const fmtMoney = n => '$' + n.toLocaleString('en-US');

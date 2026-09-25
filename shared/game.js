@@ -58,6 +58,19 @@ export const DEFAULT_WEAPON = 1;
 export const ECONOMY = { start: 0, grenade: 300, maxGrenades: 3, killBase: 300, perStreakKill: 150, max: 16000 };
 export const bounty = streak => ECONOMY.killBase + ECONOMY.perStreakKill * streak;
 
+// Announced to everybody: kills since the last death that start a spree, and kills in quick
+// succession (each within MULTI_KILL_WINDOW seconds of the one before). sound: a sample in
+// public/sounds (see audio.js), none plays a synthesized fanfare.
+export const SPREES = {
+  4: { name: 'Dominating', sound: 'dominating' }, 6: { name: 'Rampage', sound: 'rampage' },
+  8: { name: 'Killing Spree', sound: 'killingspree' }, 10: { name: 'Monster Kill', sound: 'monsterkill' },
+  12: { name: 'Unstoppable', sound: 'unstoppable' }, 14: { name: 'Ultra Kill', sound: 'ultrakill' },
+  16: { name: 'Godlike', sound: 'godlike' }, 18: { name: 'Wicked Sick', sound: 'wickedsick' },
+  20: { name: 'Ludicrous Kill', sound: 'ludicrouskill' }, 24: { name: 'Holy Shit!', sound: 'holyshit' },
+};
+export const MULTI_KILLS = { 2: { name: 'Double Kill', sound: null }, 3: { name: 'Triple Kill', sound: 'tripplekill' } };
+export const MULTI_KILL_WINDOW = 1.5;
+
 // Color grenades, bought with money (see ECONOMY). One bounces, then bursts and paints everything around it.
 export const GRENADE = {
   speed: 22.6, gravity: 20, fuse: 1.6, bounce: 0.45,

@@ -2,7 +2,7 @@
 // in worker threads (room-worker.js), any number side by side.
 
 import {
-  CONFIG as C, WEAPONS, GRENADE, DEFAULT_WEAPON, ECONOMY, bounty, HIT_ZONES, PALETTE, LEVEL, segBox, segLevel, stepProjectile, hitPoint,
+  CONFIG as C, WEAPONS, GRENADE, DEFAULT_WEAPON, ECONOMY, bounty, SPREES, MULTI_KILLS, MULTI_KILL_WINDOW, HIT_ZONES, PALETTE, LEVEL, segBox, segLevel, stepProjectile, hitPoint,
   groundHeight, lineOfSight, spawnYaw, playerHeight, eyeHeight, hitZone, headCenter,
 } from './shared/game.js';
 import { NavGraph } from './bots/nav.js';
@@ -89,6 +89,8 @@ export class Room {
       // Money, kills since the last death (the bounty on this player), grenades wanted
       // for the next life, and what this life's gun and grenades cost.
       money: ECONOMY.start, streak: 0, wantGrenades: 0, spent: 0, wantsSpawn: false,
+      // Kills in quick succession (see MULTI_KILLS) and when the last one was.
+      multi: 0, lastKillAt: 0,
     };
   }
 
@@ -167,17 +169,26 @@ export class Room {
     // The killer collects the bounty on the victim, which grows with the victim's streak.
     const reward = killer && killer !== victim ? bounty(victim.streak) : 0;
     victim.streak = 0;
+    victim.multi = 0;
     if (killer) killer.kills++;
+    // What gets announced: first blood, a spree reached, a multi-kill.
+    const news = {};
     if (reward) {
       killer.streak++;
       killer.money = Math.min(ECONOMY.max, killer.money + reward);
       send(killer.ws, { t: 'money', money: killer.money, gain: reward });
+      const now = Date.now();
+      killer.multi = now - killer.lastKillAt <= MULTI_KILL_WINDOW * 1000 ? killer.multi + 1 : 1;
+      killer.lastKillAt = now;
+      if (!this.game.firstBlood) { this.game.firstBlood = true; news.fb = 1; }
+      if (MULTI_KILLS[killer.multi]) news.mk = killer.multi;
+      if (SPREES[killer.streak]) news.sp = killer.streak;
     }
     if (victim.bot) victim.bot.onDeath();
     for (const p of this.players.values()) if (p.bot) p.bot.forget(victim.id);
     this.broadcast({
       t: 'kill', killer: killerId, victim: victim.id,
-      kk: killer ? killer.kills : 0, vd: victim.deaths, ...(headshot ? { hs: 1 } : {}), ...(reward ? { bounty: reward } : {}),
+      kk: killer ? killer.kills : 0, vd: victim.deaths, ...(headshot ? { hs: 1 } : {}), ...(reward ? { bounty: reward } : {}), ...news,
     });
     // A headshot blows the paint off everything around, as far as a grenade reaches.
     if (headshot) {
@@ -202,9 +213,10 @@ export class Room {
   startMatch() {
     this.splats = [];
     this.projectiles.length = 0;
+    this.game.firstBlood = false;
     for (const p of this.players.values()) {
       p.kills = 0; p.deaths = 0; p.ready = false; p.alive = false;
-      p.money = ECONOMY.start; p.streak = 0; p.spent = 0;
+      p.money = ECONOMY.start; p.streak = 0; p.spent = 0; p.multi = 0; p.lastKillAt = 0;
       send(p.ws, { t: 'money', money: p.money });
     }
     this.setPhase('loading', C.LOADING_TIMEOUT);

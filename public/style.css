@@ -116,6 +116,14 @@ html, body {
   70% { opacity: 1; }
   100% { opacity: 0; transform: translate(-50%, -50%) scale(1.05); }
 }
+#announce {
+  position: absolute; left: 50%; top: 13%; transform: translate(-50%, -50%);
+  text-align: center; white-space: nowrap; opacity: 0; pointer-events: none;
+  text-shadow: 0 0 10px var(--paper), 0 0 2px var(--paper);
+}
+#announce .big { display: block; font-size: 48px; font-weight: 900; letter-spacing: .04em; text-transform: uppercase; color: var(--accent); }
+#announce .sub { display: block; font-size: 20px; font-weight: 800; }
+#announce.on { animation: headshotPop 1.5s ease-out forwards; }
 .feed-item .hs {
   display: inline-block; padding: 0 6px; border-radius: 3px; font-size: 12px; font-weight: 900;
   text-transform: uppercase; letter-spacing: .05em; background: #111; color: #fff;

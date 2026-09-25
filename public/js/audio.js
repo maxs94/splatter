@@ -5,6 +5,9 @@ const FILES = {
   shoot: '/sounds/shoot.mp3',
   splat: '/sounds/splatter.mp3',
   footstep: '/sounds/footstep.mp3',
+  // Announcer (see SPREES and MULTI_KILLS in shared/game.js, and headshots).
+  ...Object.fromEntries(['firstblood', 'dominating', 'rampage', 'killingspree', 'monsterkill', 'unstoppable', 'ultrakill',
+    'godlike', 'wickedsick', 'ludicrouskill', 'holyshit', 'tripplekill', 'headshot'].map(k => [k, `/sounds/${k}.mp3`])),
 };
 
 let ctx = null;
