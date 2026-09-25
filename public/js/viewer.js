@@ -16,6 +16,10 @@ const ENTRIES = [
   { label: 'strafe left + gun', clip: 'run', gun: true, speed: 1.9, twist: 1.2 },
   { label: 'strafe right + gun', clip: 'run', gun: true, speed: 1.9, twist: -1.2 },
   { label: 'aim up/down + gun', clip: 'idle', gun: true, pitchWave: true },
+  { label: 'crouch + gun', clip: 'crouch_idle', gun: true },
+  { label: 'crouch walk + gun', clip: 'crouch_walk', gun: true, speed: 1.74 },
+  { label: 'crouch strafe left + gun', clip: 'crouch_walk', gun: true, speed: 1.74, twist: 1.2 },
+  { label: 'crouch walk', clip: 'crouch_walk', speed: 1.74 },
 ];
 
 // Ragdoll deaths: every few seconds the dummy stands up and gets shot again.

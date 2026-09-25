@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { CONFIG as C, PALETTE, LEVEL, movePlayer, stepProjectile, mulberry32, groundHeight } from '/shared/game.js';
+import { CONFIG as C, PALETTE, LEVEL, movePlayer, stepProjectile, mulberry32, groundHeight, eyeHeight } from '/shared/game.js';
 import { initAudio, play, tone, updateListener, getVolume, setVolume } from './js/audio.js';
 import { assetsReady, createCharacter, cloneGun, locomotion, poseCharacter, setAnim } from './js/characters.js';
 import { createLobby } from './js/lobby.js';
@@ -462,7 +462,7 @@ const sfx = {
 
 const me = {
   id: null, color: 0, name: '', life: 0,
-  p: [0, 0, 0], v: [0, 0, 0], onGround: false,
+  p: [0, 0, 0], v: [0, 0, 0], onGround: false, crouch: false, eye: C.EYE_HEIGHT,
   yaw: 0, pitch: 0, hp: C.MAX_HP, alive: false,
   killedBy: null, respawnAt: 0, stepDist: 0,
 };
@@ -568,14 +568,14 @@ function updateAvatar(av, dt, k) {
   let twist = 0;
   if (!av.dead) {
     const airborne = pos.y - groundHeight(pos.x, pos.z, pos.y + 0.3) > 0.3;
-    twist = locomotion(av.ch, av.vel, av.yaw, airborne);
+    twist = locomotion(av.ch, av.vel, av.yaw, airborne, av.crouch);
     const speed = Math.hypot(av.vel.x, av.vel.z);
     if (!airborne) trackSteps(av.walker, pos, av.vel.x, av.vel.z, dt);
     if (!airborne && speed > 1) {
       av.stepDist += speed * dt;
       if (av.stepDist > STEP_LENGTH) {
         av.stepDist = 0;
-        sfx.step([pos.x, pos.y, pos.z], 0.9);
+        sfx.step([pos.x, pos.y, pos.z], av.crouch ? 0.3 : 0.9); // sneaking is quieter
       }
     }
   }
@@ -875,12 +875,13 @@ function handle(m) {
       refreshStats();
       break;
     case 'st':
-      for (const [id, x, y, z, yaw, pitch] of m.l) {
+      for (const [id, x, y, z, yaw, pitch, crouch] of m.l) {
         const av = avatars.get(id);
         if (!av || av.dead) continue;
         av.target.set(x, y, z);
         av.targetYaw = yaw;
         av.targetPitch = pitch;
+        av.crouch = crouch === 1;
       }
       break;
     case 'ack': {
@@ -976,6 +977,8 @@ function placeMe(p) {
   me.p = p.slice();
   me.v = [0, 0, 0];
   me.onGround = false;
+  me.crouch = false;
+  me.eye = C.EYE_HEIGHT;
   me.hp = C.MAX_HP;
   me.alive = true;
   me.killedBy = null;
@@ -1380,6 +1383,7 @@ function gameFrame(now, dt) {
       f: canMove ? (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0) - (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0) : 0,
       r: canMove ? (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) - (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0) : 0,
       jump: canMove && (jumpQueued || keys.has('Space')),
+      crouch: canMove && keys.has('KeyC'),
       yaw: me.yaw,
     };
     jumpQueued = false;
@@ -1390,7 +1394,7 @@ function gameFrame(now, dt) {
     const speed = Math.hypot(me.v[0], me.v[2]);
     if (me.onGround && speed > 1) {
       me.stepDist += speed * dt;
-      if (me.stepDist > STEP_LENGTH) { me.stepDist = 0; play('footstep', { vol: 0.35, jitter: 0.12 }); }
+      if (me.stepDist > STEP_LENGTH) { me.stepDist = 0; play('footstep', { vol: me.crouch ? 0.15 : 0.35, jitter: 0.12 }); }
     }
     if (me.onGround && !wasOnGround) play('footstep', { vol: 0.5, jitter: 0.05 });
     if (me.onGround) trackSteps(myWalker, { x: me.p[0], y: me.p[1], z: me.p[2] }, me.v[0], me.v[2], dt);
@@ -1404,11 +1408,13 @@ function gameFrame(now, dt) {
     stateTimer += dt;
     if (stateTimer >= 1 / C.STATE_RATE) {
       stateTimer = 0;
-      send({ t: 's', p: me.p.map(x => Math.round(x * 1000) / 1000), y: me.yaw, x: me.pitch, l: me.life });
+      send({ t: 's', p: me.p.map(x => Math.round(x * 1000) / 1000), y: me.yaw, x: me.pitch, l: me.life, c: me.crouch ? 1 : 0 });
     }
   }
 
-  camera.position.set(me.p[0], me.p[1] + C.EYE_HEIGHT, me.p[2]);
+  // The view lowers and rises smoothly when crouching and standing up.
+  me.eye += (eyeHeight(me) - me.eye) * Math.min(1, 14 * dt);
+  camera.position.set(me.p[0], me.p[1] + me.eye, me.p[2]);
   camera.rotation.set(me.pitch, me.yaw, 0);
   camera.updateMatrixWorld();
   updateListener(camera);
