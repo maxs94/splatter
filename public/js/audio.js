@@ -65,13 +65,13 @@ export function updateListener(camera) {
 }
 
 // Plays a sample. With `pos` ([x, y, z]) it is placed in the world and gets quieter with
-// distance. Returns false when the sample isn't loaded (yet).
-export function play(key, { pos = null, vol = 1, jitter = 0.08 } = {}) {
+// distance, `rate` pitches it. Returns false when the sample isn't loaded (yet).
+export function play(key, { pos = null, vol = 1, jitter = 0.08, rate = 1 } = {}) {
   const buf = buffers[key];
   if (!ctx || !buf) return false;
   const src = ctx.createBufferSource();
   src.buffer = buf;
-  src.playbackRate.value = 1 + (Math.random() * 2 - 1) * jitter;
+  src.playbackRate.value = rate * (1 + (Math.random() * 2 - 1) * jitter);
   const g = ctx.createGain();
   g.gain.value = vol;
   src.connect(g);

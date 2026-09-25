@@ -12,14 +12,12 @@ export const CONFIG = {
   GRAVITY: 20,
   STEP_HEIGHT: 0.45,
 
-  BLOB_SPEED: 42,
-  BLOB_GRAVITY: 9,
   BLOB_RADIUS: 0.12,
-  BLOB_LIFETIME: 4,
   MUZZLE_OFFSET: 0.2,
+  RELOAD_SLACK: 0.1, // seconds the server lets a reload finish early, for latency
 
-  FIRE_INTERVAL: 0.18,
-  DAMAGE: 25,
+  GRENADES_PER_LIFE: 1,
+
   MAX_HP: 100,
   RESPAWN_TIME: 3,
   REGEN_DELAY: 4,   // seconds without damage before health regenerates
@@ -33,6 +31,28 @@ export const CONFIG = {
 
   SPLAT_RADIUS: 0.75,
   MAX_SPLATS: 5000,
+};
+
+// Guns, indexed by the id sent over the wire. You pick one, it is yours for your next life.
+// interval: seconds between shots, auto: keeps firing while the button is held,
+// lifetime: seconds a shot flies before it dries up in the air (that is the range),
+// splat: size of the paint splat relative to SPLAT_RADIUS.
+export const WEAPONS = [
+  { name: 'Color gun', ammo: 30, auto: true, interval: 0.18, speed: 42, gravity: 9, lifetime: 4, damage: 25, reload: 1.6, splat: 1,
+    info: 'Lobs paint in an arc' },
+  { name: 'Pistol', ammo: 10, auto: false, interval: 0.22, speed: 38, gravity: 9, lifetime: 0.45, damage: 25, reload: 1.1, splat: 0.8,
+    info: 'Short range, one shot per click' },
+  { name: 'Rifle', ammo: 30, auto: true, interval: 0.1, speed: 60, gravity: 5, lifetime: 0.8, damage: 20, reload: 1.8, splat: 0.7,
+    info: 'Fast fire, middle range' },
+  { name: 'Sniper', ammo: 3, auto: false, interval: 1, speed: 170, gravity: 0, lifetime: 0.6, damage: 100, reload: 2.5, splat: 1.2,
+    info: 'Straight and far, one hit splats' },
+];
+
+// Everybody carries a color grenade. It bounces, then bursts and paints everything around it.
+export const GRENADE = {
+  speed: 22.6, gravity: 20, fuse: 1.6, bounce: 0.45,
+  radius: 13.5, damage: 100, minDamage: 20, // damage at the center, falling to minDamage at the edge
+  rays: 48, splat: 6.4,
 };
 
 export const PALETTE = [
@@ -177,15 +197,31 @@ export function segBox(o, s, min, max, pad) {
   return { t: tmin, axis, sign };
 }
 
-// Advances a projectile { p, v } by dt and reports the first level hit along the way.
-export function stepProjectile(pr, dt) {
-  pr.v[1] -= CONFIG.BLOB_GRAVITY * dt;
-  const o = pr.p;
-  const s = [pr.v[0] * dt, pr.v[1] * dt, pr.v[2] * dt];
+// First level hit along the segment o -> o + s, or null.
+export function segLevel(o, s, pad) {
   let hit = null;
   for (const b of boxes) {
-    const h = segBox(o, s, b.min, b.max, CONFIG.BLOB_RADIUS);
+    const h = segBox(o, s, b.min, b.max, pad);
     if (h && (!hit || h.t < hit.t)) { hit = h; hit.box = b; }
+  }
+  return hit;
+}
+
+// Advances a projectile { p, v, w } (w: index into WEAPONS, or nade: true) by dt and
+// reports the first level hit along the way. Grenades bounce off the level instead.
+export function stepProjectile(pr, dt) {
+  pr.v[1] -= (pr.nade ? GRENADE.gravity : WEAPONS[pr.w].gravity) * dt;
+  const o = pr.p;
+  const s = [pr.v[0] * dt, pr.v[1] * dt, pr.v[2] * dt];
+  const hit = segLevel(o, s, CONFIG.BLOB_RADIUS);
+  if (pr.nade && hit) {
+    // Stop at the wall, mirror the velocity off it and lose some speed.
+    const a = hit.axis, face = hit.sign > 0 ? hit.box.max[a] : hit.box.min[a];
+    pr.p = [o[0] + s[0] * hit.t, o[1] + s[1] * hit.t, o[2] + s[2] * hit.t];
+    pr.p[a] = face + hit.sign * (CONFIG.BLOB_RADIUS + 2e-3);
+    pr.v[hit.axis] = -pr.v[hit.axis];
+    for (let a = 0; a < 3; a++) pr.v[a] *= GRENADE.bounce;
+    return { o, s, hit: null };
   }
   pr.p = [o[0] + s[0], o[1] + s[1], o[2] + s[2]];
   return { o, s, hit };

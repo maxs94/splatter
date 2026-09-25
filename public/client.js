@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { CONFIG as C, PALETTE, LEVEL, movePlayer, stepProjectile, mulberry32, groundHeight, spawnYaw } from '/shared/game.js';
+import { CONFIG as C, WEAPONS, GRENADE, PALETTE, LEVEL, movePlayer, stepProjectile, mulberry32, groundHeight, spawnYaw } from '/shared/game.js';
 import { initAudio, play, tone, updateListener, getVolume, setVolume } from './js/audio.js';
 import { assetsReady, createCharacter, cloneGun, locomotion, poseCharacter, setAnim } from './js/characters.js';
 import { createLobby } from './js/lobby.js';
@@ -264,6 +264,8 @@ function paintCircles(f, sp, circles, base, mask = true) {
 // mode: 'live' simulates the paint running down walls in real time, 'instant' runs
 // that simulation to the end right away, 'static' skips it (cheap replays).
 function paintSplat(sp, mode = 'live') {
+  // Grenade splats are meters wide, too big for the running-paint simulation.
+  if (sp.nade) mode = 'static';
   const t = perf.begin();
   perf.count(`paint.splats.${mode}`);
   paintSplatInner(sp, mode);
@@ -499,12 +501,22 @@ function setGunColor(c) {
   viewGunShell.color.set(PALETTE[c]);
 }
 
+// One gun model for every gun, sized to tell them apart: [width, height, length].
+const GUN_SCALE = [[1, 1, 1], [0.9, 0.9, 0.6], [0.9, 0.9, 1.15], [0.8, 0.8, 1.35]];
+const GUN_RECOIL = [1, 1, 0.7, 2.2];
+
 // ---------------------------------------------------------------- Sound
 
 const STEP_LENGTH = 2.2; // meters between footsteps
+// Per gun: volume and pitch of the shot sample.
+const GUN_SOUND = [{ vol: 1, rate: 1 }, { vol: 0.8, rate: 1.35 }, { vol: 0.8, rate: 1.2 }, { vol: 1.6, rate: 0.6 }];
 const sfx = {
-  shoot: () => play('shoot', { vol: 0.5 }) || tone(520, 170, 0.09, 'triangle', 0.14),
-  shootAt: p => play('shoot', { pos: p, vol: 0.8 }),
+  shoot: w => play('shoot', { vol: 0.5 * GUN_SOUND[w].vol, rate: GUN_SOUND[w].rate }) || tone(520, 170, 0.09, 'triangle', 0.14),
+  shootAt: (p, w) => play('shoot', { pos: p, vol: 0.8 * GUN_SOUND[w].vol, rate: GUN_SOUND[w].rate }),
+  throw: () => tone(300, 520, 0.12, 'sine', 0.12),
+  boom: p => { play('splat', { pos: p, vol: 2.2, rate: 0.55, jitter: 0.05 }) || tone(120, 30, 0.4, 'sawtooth', 0.25); },
+  empty: () => tone(900, 700, 0.03, 'square', 0.05),
+  reload: () => tone(380, 520, 0.08, 'triangle', 0.08),
   splat: p => play('splat', { pos: p, vol: 1 }) || tone(170, 45, 0.16, 'sine', 0.2),
   step: (p, vol) => play('footstep', { pos: p, vol, jitter: 0.12 }),
   hit: () => tone(1500, 1100, 0.05, 'square', 0.05),
@@ -519,7 +531,12 @@ const me = {
   p: [0, 0, 0], v: [0, 0, 0], onGround: false,
   yaw: 0, pitch: 0, hp: C.MAX_HP, alive: false,
   killedBy: null, respawnAt: 0, stepDist: 0,
+  // Gun of this life (index into WEAPONS), predicted magazine and reload, grenades left.
+  weapon: 0, ammo: WEAPONS[0].ammo, reloadUntil: 0, grenades: C.GRENADES_PER_LIFE,
 };
+// The gun picked for the next life, kept per browser.
+let chosenWeapon = 0;
+try { chosenWeapon = Math.min(WEAPONS.length - 1, Math.max(0, parseInt(localStorage.getItem('splatter-weapon'), 10) || 0)); } catch {}
 const myWalker = makeWalker();
 const roster = new Map();      // id -> { id, name, color, kills, deaths }
 const avatars = new Map();     // remote id -> avatar
@@ -729,8 +746,13 @@ function reviveAvatar(av, p) {
 const fluid = createFluid(renderer);
 const paintColors = PALETTE.map(hex => new THREE.Color(hex));
 
-function spawnProjectile(key, o, v, color, offset) {
-  projectiles.set(key, { color: paintColors[color] || paintColors[0], p: o.slice(), v: v.slice(), born: performance.now(), offset });
+// w: index into WEAPONS, or 'g' for a grenade.
+function spawnProjectile(key, o, v, color, offset, w = 0) {
+  const nade = w === 'g';
+  projectiles.set(key, {
+    color: paintColors[color] || paintColors[0], p: o.slice(), v: v.slice(), born: performance.now(), offset,
+    w: nade ? 0 : w, nade, life: nade ? GRENADE.fuse + 1 : WEAPONS[w].lifetime,
+  });
 }
 
 function removeProjectile(key) {
@@ -742,14 +764,26 @@ const _head = new THREE.Vector3(), _dir = new THREE.Vector3();
 function updateProjectiles(dt) {
   const now = performance.now();
   for (const [key, pr] of projectiles) {
+    const from = pr.p;
     const { hit } = stepProjectile(pr, dt);
     // The server decides impacts; locally we only hide blobs that hit a wall.
-    if (hit || now - pr.born > C.BLOB_LIFETIME * 1000) { removeProjectile(key); continue; }
+    // Grenades wait for the server's 'boom' (life is only a fallback).
+    if (hit || now - pr.born > pr.life * 1000) { removeProjectile(key); continue; }
     _head.set(...pr.p);
+    if (pr.nade) {
+      fluid.blob(_head.clone(), 0.3, pr.color);
+      continue;
+    }
     if (pr.offset) {
       // Start the blob at the gun muzzle and blend onto the true aim line.
       const k = Math.max(0, 1 - (now - pr.born) / 120);
       _head.addScaledVector(pr.offset, k);
+    }
+    if (pr.w === 3) {
+      // Sniper shots cover meters per frame: a thin streak along the way they flew.
+      _dir.set(pr.p[0] - from[0], pr.p[1] - from[1], pr.p[2] - from[2]);
+      for (let i = 0; i < 6; i++) fluid.blob(_head.clone().addScaledVector(_dir, -i / 6), 0.1 - i * 0.008, pr.color);
+      continue;
     }
     // A gooey drop with a short tail that merges into it.
     _dir.set(...pr.v).normalize();
@@ -764,6 +798,7 @@ let lastShot = 0;
 const pendingShots = new Map(); // client shot id -> projectile key
 
 function shoot() {
+  const gun = WEAPONS[me.weapon];
   const dir = new THREE.Vector3();
   camera.getWorldDirection(dir);
   const eye = camera.position;
@@ -774,11 +809,59 @@ function shoot() {
   muzzle.getWorldPosition(muzzlePos);
   const offset = muzzlePos.sub(new THREE.Vector3(...o));
   const key = 'c' + cid;
-  spawnProjectile(key, o, d.map(x => x * C.BLOB_SPEED), me.color, offset);
+  spawnProjectile(key, o, d.map(x => x * gun.speed), me.color, offset, me.weapon);
   pendingShots.set(cid, key);
   send({ t: 'shoot', cid, o, d });
-  recoil = 1;
-  sfx.shoot();
+  recoil = GUN_RECOIL[me.weapon];
+  sfx.shoot(me.weapon);
+  if (--me.ammo <= 0) startReload();
+}
+
+// Reloads are predicted here with the server's rules; it only accepts shots it agrees with.
+function startReload() {
+  const gun = WEAPONS[me.weapon];
+  if (me.reloadUntil || me.ammo >= gun.ammo || !me.alive) return;
+  me.reloadUntil = performance.now() + gun.reload * 1000;
+  send({ t: 'reload' });
+  sfx.reload();
+}
+
+function throwGrenade() {
+  if (!me.alive || round.state !== 'playing' || me.grenades <= 0) return;
+  me.grenades--;
+  const dir = new THREE.Vector3();
+  camera.getWorldDirection(dir);
+  // Thrown a little above the aim point, like a real throw.
+  dir.y += 0.12;
+  dir.normalize();
+  const eye = camera.position;
+  const o = [eye.x + dir.x * C.MUZZLE_OFFSET, eye.y + dir.y * C.MUZZLE_OFFSET, eye.z + dir.z * C.MUZZLE_OFFSET];
+  const d = [dir.x, dir.y, dir.z];
+  const cid = ++shotCounter;
+  const key = 'c' + cid;
+  spawnProjectile(key, o, d.map(x => x * GRENADE.speed), me.color, null, 'g');
+  pendingShots.set(cid, key);
+  send({ t: 'nade', cid, o, d });
+  sfx.throw();
+}
+
+function chooseWeapon(w) {
+  if (!WEAPONS[w]) return;
+  chosenWeapon = w;
+  try { localStorage.setItem('splatter-weapon', String(w)); } catch {}
+  send({ t: 'weapon', w });
+  // Before the round starts the server switches right away, otherwise on the next life.
+  if (round.state === 'loading' || round.state === 'countdown') armMe(w);
+  else if (me.alive && w !== me.weapon) toast(`${WEAPONS[w].name} next life`);
+  renderPicker();
+}
+
+function armMe(w) {
+  me.weapon = w;
+  me.ammo = WEAPONS[w].ammo;
+  me.reloadUntil = 0;
+  me.grenades = C.GRENADES_PER_LIFE;
+  if (viewGun) viewGun.scale.set(...GUN_SCALE[w].map(x => x * 0.5));
 }
 
 // ---------------------------------------------------------------- Networking
@@ -904,6 +987,7 @@ function handle(m) {
       $('lobbyTitle').textContent = m.room.name;
       me.id = m.id;
       me.life = m.life;
+      armMe(chosenWeapon);
       if (m.phase === 'lobby') showScreen('lobby');
       else enterGame(m);
       break;
@@ -945,12 +1029,25 @@ function handle(m) {
       break;
     }
     case 'shot':
-      spawnProjectile(m.id, m.o, m.v, m.c, null);
-      sfx.shootAt(m.o);
+      if (m.g) spawnProjectile(m.id, m.o, m.v, m.c, null, 'g');
+      else {
+        spawnProjectile(m.id, m.o, m.v, m.c, null, m.w);
+        sfx.shootAt(m.o, m.w);
+      }
       break;
-    case 'splat': {
+    case 'boom': {
       removeProjectile(m.id);
+      sfx.boom(m.p);
+      fluid.splash(m.p, [0, 1, 0], paintColors[m.c], { count: 120, speed: 12, size: 0.2, life: 1.1 });
+      const d = Math.hypot(m.p[0] - me.p[0], m.p[1] - me.p[1] - C.EYE_HEIGHT, m.p[2] - me.p[2]);
+      if (me.alive) shake = Math.max(shake, 1 - d / (GRENADE.radius * 1.5));
+      break;
+    }
+    case 'splat': {
       paintSplat(m);
+      // A grenade paints many spots at once; its 'boom' does the sound and the burst.
+      if (m.nade) break;
+      removeProjectile(m.id);
       sfx.splat(m.p);
       const n = [0, 0, 0];
       n[m.a] = m.sg;
@@ -1010,6 +1107,7 @@ function handle(m) {
       if (m.id === me.id) {
         me.life = m.life;
         placeMe(m.p);
+        armMe(m.w);
       } else {
         const av = avatars.get(m.id);
         if (av) reviveAvatar(av, m.p);
@@ -1139,7 +1237,7 @@ $('roomList').addEventListener('click', e => {
   if (!b || joining) return;
   joining = true;
   $('browserError').textContent = '';
-  send({ t: 'join', room: b.dataset.room });
+  send({ t: 'join', room: b.dataset.room, weapon: chosenWeapon });
   renderBrowser();
 });
 {
@@ -1147,7 +1245,7 @@ $('roomList').addEventListener('click', e => {
     if (joining) return;
     joining = true;
     $('browserError').textContent = '';
-    send({ t: 'create', name: $('roomName').value.trim(), bots: $('createBots').checked });
+    send({ t: 'create', name: $('roomName').value.trim(), bots: $('createBots').checked, weapon: chosenWeapon });
     $('roomName').value = '';
     renderBrowser();
   };
@@ -1192,6 +1290,14 @@ function hitMarker(isKill) {
   clearTimeout(hitTimer);
   hitTimer = setTimeout(() => el.classList.remove('on', 'kill'), isKill ? 350 : 120);
 }
+
+function renderPicker() {
+  $('weaponPicker').innerHTML = `<div class="picker-title">Gun for your next life</div><div class="picker-cards">${WEAPONS.map((g, i) => `
+    <div class="gun-card${i === chosenWeapon ? ' on' : ''}">
+      <kbd>${i + 1}</kbd><b>${esc(g.name)}</b><span>${g.ammo} rounds · ${esc(g.info)}</span>
+    </div>`).join('')}</div>`;
+}
+renderPicker();
 
 function splashScreen(color) {
   const el = $('splash');
@@ -1285,6 +1391,17 @@ function updateHud(now, dt) {
     $('centerMsg').innerHTML = '';
   }
 
+  // Gun picker: while waiting to respawn and before the round starts.
+  $('weaponPicker').hidden = !(dead || round.state === 'loading' || round.state === 'countdown');
+  const gun = WEAPONS[me.weapon];
+  $('ammo').hidden = !me.alive;
+  $('ammoName').textContent = gun.name;
+  $('ammoCount').innerHTML = me.reloadUntil ? '<span class="reloading">Reloading</span>' : `${me.ammo}<small> / ${gun.ammo}</small>`;
+  $('ammoBar').style.transform = `scaleX(${me.reloadUntil ? Math.min(1, 1 - (me.reloadUntil - now) / (gun.reload * 1000)) : me.ammo / gun.ammo})`;
+  $('ammo').classList.toggle('low', !me.reloadUntil && me.ammo <= Math.ceil(gun.ammo / 4));
+  $('grenades').textContent = me.grenades;
+  $('grenadeBox').classList.toggle('empty', me.grenades <= 0);
+
   // Stats: hold Tab, or automatically while waiting to respawn.
   const showBoard = (tabHeld || dead) && $('roundEnd').hidden;
   if (showBoard && (now - lastBoardRender > 250 || $('scoreboard').hidden)) {
@@ -1305,6 +1422,8 @@ let firing = false;
 let jumpQueued = false;
 let tabHeld = false;
 let recoil = 0;
+let shake = 0;          // camera shake from a close grenade, 0..1
+let triggerPulled = false; // a new click, for guns that fire once per click
 const SENS = 0.0022;
 // Inverted look: moving the mouse forward looks down. Set in the Esc menu, kept per browser.
 let invertY = false;
@@ -1319,9 +1438,15 @@ document.addEventListener('keydown', e => {
   }
   keys.add(e.code);
   if (e.code === 'Space') { jumpQueued = true; e.preventDefault(); }
+  if (e.repeat) return;
+  if (e.code === 'KeyR') startReload();
+  const digit = /^Digit([1-9])$/.exec(e.code);
+  if (digit) chooseWeapon(Number(digit[1]) - 1);
 });
 document.addEventListener('keyup', e => {
   if (e.code === 'Tab') tabHeld = false;
+  // The grenade leaves your hand when you let go of Q (pressed in the game).
+  if (e.code === 'KeyQ' && keys.has('KeyQ') && screen === 'game') throwGrenade();
   keys.delete(e.code);
 });
 window.addEventListener('blur', () => { keys.clear(); firing = false; tabHeld = false; });
@@ -1338,7 +1463,7 @@ document.addEventListener('mousemove', e => {
   me.pitch = Math.max(-1.55, Math.min(1.55, me.pitch - e.movementY * SENS * (invertY ? -1 : 1)));
 });
 document.addEventListener('mousedown', e => {
-  if (e.button === 0 && locked() && screen === 'game') firing = true;
+  if (e.button === 0 && locked() && screen === 'game') firing = triggerPulled = true;
 });
 document.addEventListener('mouseup', e => {
   if (e.button === 0) firing = false;
@@ -1450,10 +1575,22 @@ function gameFrame(now, dt) {
     if (me.onGround) trackSteps(myWalker, { x: me.p[0], y: me.p[1], z: me.p[2] }, me.v[0], me.v[2], dt);
     wasOnGround = me.onGround;
 
-    if (firing && round.state === 'playing' && now - lastShot >= C.FIRE_INTERVAL * 1000) {
-      lastShot = now;
-      shoot();
+    const gun = WEAPONS[me.weapon];
+    if (me.reloadUntil && now >= me.reloadUntil) { me.reloadUntil = 0; me.ammo = gun.ammo; }
+    if (firing && (gun.auto || triggerPulled) && round.state === 'playing' && now - lastShot >= gun.interval * 1000) {
+      triggerPulled = false;
+      if (me.reloadUntil) {
+        // still reloading
+      } else if (me.ammo <= 0) {
+        sfx.empty();
+        startReload();
+      } else {
+        lastShot = now;
+        shoot();
+      }
     }
+    // A click that comes too early for a single-shot gun is dropped, not queued.
+    if (!gun.auto && now - lastShot < gun.interval * 1000) triggerPulled = false;
 
     stateTimer += dt;
     if (stateTimer >= 1 / C.STATE_RATE) {
@@ -1463,7 +1600,9 @@ function gameFrame(now, dt) {
   }
 
   camera.position.set(me.p[0], me.p[1] + C.EYE_HEIGHT, me.p[2]);
-  camera.rotation.set(me.pitch, me.yaw, 0);
+  shake = Math.max(0, shake - dt * 2.5);
+  const sk = shake * shake * 0.04;
+  camera.rotation.set(me.pitch + (Math.random() - 0.5) * sk, me.yaw + (Math.random() - 0.5) * sk, 0);
   camera.updateMatrixWorld();
   updateListener(camera);
 
@@ -1472,8 +1611,10 @@ function gameFrame(now, dt) {
     recoil = Math.max(0, recoil - dt * 9);
     const speed = Math.hypot(me.v[0], me.v[2]);
     const bob = me.onGround ? Math.sin(now / 90) * Math.min(1, speed / C.MOVE_SPEED) : 0;
-    viewGun.position.set(0.2 + bob * 0.006, -0.21 + Math.abs(bob) * 0.008 + recoil * 0.012, -0.42 + recoil * 0.04);
-    viewGun.rotation.x = recoil * 0.2;
+    // Reloading: the gun dips out of view and comes back.
+    const reload = me.reloadUntil ? Math.sin(Math.PI * Math.min(1, 1 - (me.reloadUntil - now) / (WEAPONS[me.weapon].reload * 1000))) : 0;
+    viewGun.position.set(0.2 + bob * 0.006, -0.21 + Math.abs(bob) * 0.008 + recoil * 0.012 - reload * 0.12, -0.42 + recoil * 0.04);
+    viewGun.rotation.x = recoil * 0.2 - reload * 0.6;
   }
 
   perf.end('player', tp);

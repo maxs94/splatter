@@ -4,7 +4,7 @@
 // they are very close; paint on a player, a fired shot or recent tracking make a
 // player visible. They also hear shots and feel roughly where a hit came from.
 
-import { CONFIG as C, lineOfSight, movePlayer, spawnYaw } from '../shared/game.js';
+import { CONFIG as C, WEAPONS, GRENADE, lineOfSight, movePlayer, spawnYaw } from '../shared/game.js';
 import { Domain, plan, task as t } from './htn.js';
 import { prof } from '../profiler.js';
 
@@ -50,10 +50,11 @@ function inView(from, yaw, pitch, point) {
   return dot > SENSE.fovCos;
 }
 
-// Launch angle to hit a point dx away horizontally and dy higher (low arc).
-function ballisticPitch(dx, dy) {
-  if (dx < 0.5) return Math.atan2(dy, Math.max(dx, 1e-3));
-  const v2 = C.BLOB_SPEED * C.BLOB_SPEED, g = C.BLOB_GRAVITY;
+// Launch angle to hit a point dx away horizontally and dy higher (low arc), for a
+// projectile of the given speed and gravity.
+function ballisticPitch(dx, dy, speed, g) {
+  if (dx < 0.5 || g <= 0) return Math.atan2(dy, Math.max(dx, 1e-3));
+  const v2 = speed * speed;
   const disc = v2 * v2 - g * (g * dx * dx + 2 * dy * v2);
   if (disc < 0) return Math.PI / 4;
   return Math.atan((v2 - Math.sqrt(disc)) / (g * dx));
@@ -79,7 +80,7 @@ D.method('Live', 'counter', ws => ws.hurtFrom != null, ws => [
 D.method('Live', 'investigate', ws => ws.threat != null, ws => [t('Investigate', { threat: ws.threat })]);
 D.method('Live', 'patrol', () => true, () => [t('Patrol')]);
 
-D.method('Engage', 'close in', ws => ws.enemyDist > 24, (ws, a) => [
+D.method('Engage', 'close in', ws => ws.enemyDist > ws.range, (ws, a) => [
   ...(ws.enemyFresh ? [t('React', { id: a.id })] : []),
   t('Approach', { id: a.id }),
 ]);
@@ -89,6 +90,12 @@ D.method('Engage', 'fight fresh', ws => ws.enemyFresh, (ws, a) => [
   t('FireBurst', { id: a.id }),
 ]);
 D.method('Engage', 'fight', () => true, (ws, a) => [t('AimAt', { id: a.id }), t('FireBurst', { id: a.id })]);
+
+// Somebody hides nearby: a grenade paints the whole spot and may hurt them.
+D.method('Investigate', 'grenade', (ws, a) => ws.grenades > 0 && a.threat.dist > 7 && a.threat.dist < 22, (ws, a) => [
+  t('ThrowGrenade', { pos: a.threat.pos }),
+  t('LookAround', { time: 1.2 }),
+]);
 
 // Close by: paint the spot to reveal whoever is there. Far away: walk over first.
 D.method('Investigate', 'paint the spot', (ws, a) => a.threat.dist < 16, (ws, a) => [
@@ -122,6 +129,7 @@ D.operator('React', { cond: hasEnemy, effect: ws => { ws.enemyFresh = false; } }
 D.operator('AimAt', { cond: hasEnemy });
 D.operator('FireBurst', { cond: hasEnemy });
 D.operator('Approach', { cond: hasEnemy });
+D.operator('ThrowGrenade', { cond: hasPos, effect: ws => { ws.grenades = 0; ws.threat = null; } });
 D.operator('SprayArea', {
   cond: hasPos,
   effect: (ws, a) => {
@@ -213,7 +221,7 @@ const BEHAVIORS = {
   },
 
   *FireBurst({ id }) {
-    let shots = randInt(2, 5);
+    let shots = WEAPONS[this.pl.weapon].auto ? randInt(2, 5) : randInt(1, 2);
     let pauseUntil = 0;
     let strafe = Math.random() < 0.5 ? -1 : 1;
     let switchAt = this.now() + rand(400, 1200);
@@ -243,7 +251,7 @@ const BEHAVIORS = {
     while (this.now() < end) {
       const q = this.game.players.get(id), m = this.memory.get(id);
       if (!q || !q.alive || !m) return false;
-      if (!m.visible || hdist(this.pl.p, q.p) < 18) return true;
+      if (!m.visible || hdist(this.pl.p, q.p) < Math.min(18, this.range() * 0.7)) return true;
       if (this.now() > repathAt) {
         route = this.route(q.p);
         repathAt = this.now() + 1000;
@@ -255,6 +263,20 @@ const BEHAVIORS = {
       yield;
     }
     return true;
+  },
+
+  *ThrowGrenade({ pos }) {
+    const end = this.now() + 1500;
+    while (this.now() < end) {
+      this.aimBallistic(pos, 1, GRENADE);
+      if (this.aimError() < 0.1) {
+        const me = this.pl, d = dirOf(me.yaw, me.pitch), e = eye(me.p);
+        this.game.throwGrenade(me, e.map((x, i) => x + d[i] * C.MUZZLE_OFFSET), d);
+        return true;
+      }
+      yield;
+    }
+    return false;
   },
 
   *SprayArea({ pos, shots, spread, investigate, clearHurt }) {
@@ -278,7 +300,7 @@ const BEHAVIORS = {
 // ---------------------------------------------------------------- Bot
 
 export class Bot {
-  // game: { players: Map, nav: NavGraph, fire(player, origin, dir), isPlaying() }
+  // game: { players: Map, nav: NavGraph, fire(player, origin, dir), throwGrenade(player, origin, dir), isPlaying() }
   constructor(pl, game, skill) {
     this.pl = pl;
     this.game = game;
@@ -307,6 +329,20 @@ export class Bot {
   }
 
   // ------------------------------------------------ Events from the server
+
+  // Picks the gun for the next life.
+  pickWeapon() {
+    const weights = [0.35, 0.2, 0.3, 0.15];
+    let r = Math.random(), w = 0;
+    while (w < weights.length - 1 && (r -= weights[w]) > 0) w++;
+    this.pl.nextWeapon = w;
+  }
+
+  // How far the current gun reaches, in meters (the color gun's arc reaches about 24).
+  range() {
+    const gun = WEAPONS[this.pl.weapon];
+    return Math.min(24, gun.speed * gun.lifetime);
+  }
 
   onRespawn() {
     this.reset();
@@ -435,7 +471,7 @@ export class Bot {
     const retreatReady = now - this.lastRetreat > 10000;
     const cover = me.hp <= 40 && dangerPos && retreatReady ? this.findCover(dangerPos) : null;
     return {
-      hp: me.hp, enemy, enemyDist, enemyFresh, threat, hurtFrom, dangerPos, cover, retreatReady,
+      hp: me.hp, grenades: me.grenades, range: this.range() * 0.9, enemy, enemyDist, enemyFresh, threat, hurtFrom, dangerPos, cover, retreatReady,
       roll: Math.random(),
       revealPoint: this.pickRevealPoint(),
       wanderPoint: this.pickWanderPoint(),
@@ -603,17 +639,18 @@ export class Bot {
     this.wantPitch = -0.05;
   }
 
-  aimBallistic(point, rangeFactor = 1) {
+  // proj: what flies, the current gun unless given (GRENADE).
+  aimBallistic(point, rangeFactor = 1, proj = WEAPONS[this.pl.weapon]) {
     const e = eye(this.pl.p);
     const dx = point[0] - e[0], dy = point[1] - e[1], dz = point[2] - e[2];
     this.wantYaw = Math.atan2(-dx, -dz);
-    this.wantPitch = ballisticPitch(Math.hypot(dx, dz) * rangeFactor, dy);
+    this.wantPitch = ballisticPitch(Math.hypot(dx, dz) * rangeFactor, dy, proj.speed, proj.gravity);
   }
 
   // Aims at a remembered enemy with partial lead and a misjudged range.
   aimAtTarget(q, m) {
     const base = m.visible ? q.p : m.pos;
-    const flight = hdist(eye(this.pl.p), base) / C.BLOB_SPEED;
+    const flight = hdist(eye(this.pl.p), base) / WEAPONS[this.pl.weapon].speed;
     const lead = this.skill * 0.7;
     this.aimBallistic([
       base[0] + m.vel[0] * flight * lead,
@@ -634,7 +671,8 @@ export class Bot {
     const e = eye(me.p);
     const o = e.map((x, i) => x + d[i] * C.MUZZLE_OFFSET);
     if (!this.game.fire(me, o, d)) return false;
-    this.nextShot = now + C.FIRE_INTERVAL * 1000 * rand(1.15, 1.8);
+    const gun = WEAPONS[me.weapon];
+    this.nextShot = now + gun.interval * 1000 * (gun.auto ? rand(1.15, 1.8) : rand(1.6, 3));
     return true;
   }
 }
