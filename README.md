@@ -27,14 +27,20 @@ gives them away.
 
 ## Match flow
 
-1. Pick a name and a paint color, then **Join lobby**.
-2. The lobby shows everyone who joined as a 3D model in their color with their name above
-   their head. The first player to join leads the lobby (crown) and gets the **Start match**
-   button. If the leader leaves, the next player takes over.
-3. On start, every client loads the arena. Once all are ready (or after 12 seconds), bots fill
+1. Pick a name and a paint color, then **Find a game**.
+2. The lobby browser lists every open lobby with its name, how many of the 10 player slots
+   are taken, whether bots are on and whether a match is running. Join one, or create your
+   own lobby and give it a name. Every lobby plays its own match, so several groups can
+   play at the same time, each with their own bots.
+3. The lobby shows everyone who joined as a 3D model in their color with their name above
+   their head. The player who created the lobby leads it (crown) and gets the **Start match**
+   button. If the leader leaves, the next player takes over. **Leave** (in the lobby or
+   from the Esc menu in a match) takes you back to the lobby browser, and a lobby closes
+   once its last player has left.
+4. On start, every client loads the arena. Once all are ready (or after 12 seconds), bots fill
    the empty slots and a 5 second countdown runs in the arena before the round starts.
-4. After the round the results show for 10 seconds, then everyone returns to the lobby.
-   Players who join while a match runs drop straight into it.
+5. After the round the results show for 10 seconds, then everyone returns to the lobby.
+   Players who join a lobby while its match runs drop straight into it.
 
 With `?debug` in the URL, the **Animation viewer** button in the lobby opens a debug scene with the player model
 looping every animation and the in-game combinations (gun pose, strafing, aiming).
@@ -58,8 +64,8 @@ docker run --rm -it -p 3000:3000 -v "$PWD":/app -w /app node:22-alpine node serv
 
 ## Bots
 
-A match holds up to 10 players. The lobby leader decides whether bots join and how many
-(1 to 9). Bots never push the total over 10: a player who joins a full match takes a bot's
+A match holds up to 10 players. Whoever creates a lobby chooses whether it has bots, and
+the lobby leader can change that and how many join (1 to 9). Bots never push the total over 10: a player who joins a full match takes a bot's
 place, and the bot comes back when that player leaves. `BOTS` in `docker-compose.yml` sets
 the default bot count of a new lobby, `BOT_SKILL` (0 to 1, default 0.4) makes them weaker
 or stronger.
@@ -92,7 +98,8 @@ Run with `BOT_DEBUG=1` to log every plan the bots make.
 
 Set `PROFILE: "1"` in `docker-compose.yml` (and rebuild) to profile the server. While a
 match runs it logs a line every 5 s (`docker compose logs -f`), and after every match it
-writes a report to `./profiles/`: tick times against the 16.7 ms budget, time per code
+writes a report to `./profiles/`. With several lobbies playing at once, a report covers
+the whole server from the first match starting until no match is running any more: tick times against the 16.7 ms budget, time per code
 section (bots split into perception, planning, cover search, pathfinding, behaviors,
 movement), counters, network traffic per message type, event loop delay, GC, memory and
 the slowest ticks. `PROFILE_CPU: "1"` also records a `.cpuprofile` per match, which opens
@@ -122,9 +129,11 @@ matched with the other.
 
 ## How it works
 
-- `server.js` serves the static files and runs the authoritative game over WebSockets (`ws`):
-  it simulates every paint blob against the level and the players at 60 Hz, applies damage,
-  handles kills, respawns and rounds, and keeps a list of splats for players who join late.
+- `server.js` serves the static files, keeps the list of lobbies and routes every
+  WebSocket (`ws`) connection to its lobby. One 60 Hz loop advances all of them.
+- `room.js` is one lobby and its authoritative match: it simulates every paint blob against
+  the level and the players, applies damage, handles kills, respawns, rounds and bots, and
+  keeps a list of splats for players who join late.
 - `shared/game.js` holds the config, the level (axis-aligned boxes), the player movement and
   the projectile physics. Server and browser both import it.
 - `public/client.js` renders with Three.js. Every visible box face is a quad with its own

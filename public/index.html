@@ -51,7 +51,7 @@
 
   <div id="lobbyUi" hidden>
     <div class="lobby-card">
-      <h1 class="lobby-title">Lobby</h1>
+      <h1 id="lobbyTitle" class="lobby-title">Lobby</h1>
       <p id="lobbyStatus" class="lobby-status"></p>
       <ul id="lobbyList"></ul>
       <div class="bot-settings">
@@ -71,6 +71,29 @@
     </div>
   </div>
 
+  <div id="browser" hidden>
+    <div class="browser-card">
+      <div class="browser-head">
+        <h1 class="lobby-title">Games</h1>
+        <span id="browserMe" class="browser-me"></span>
+      </div>
+      <p id="browserStatus" class="lobby-status"></p>
+      <ul id="roomList"></ul>
+      <div class="create">
+        <div class="label">New lobby</div>
+        <div class="create-row">
+          <input id="roomName" maxlength="24" autocomplete="off" spellcheck="false" placeholder="Lobby name">
+          <label class="toggle"><input type="checkbox" id="createBots" checked> Bots</label>
+        </div>
+        <button id="createRoom" class="btn primary big">Create lobby</button>
+      </div>
+      <p id="browserError"></p>
+      <div class="buttons">
+        <button id="browserBack" class="btn">Change name or color</button>
+      </div>
+    </div>
+  </div>
+
   <div id="viewerUi" hidden>
     <button id="closeViewer" class="btn">Back to lobby</button>
     <span>Drag to orbit, right-drag to pan, scroll to zoom</span>
@@ -83,7 +106,7 @@
       <label>Name <input id="name" maxlength="16" autocomplete="off" spellcheck="false" placeholder="Your name"></label>
       <div class="label">Paint</div>
       <div id="palette"></div>
-      <button id="play">Join lobby</button>
+      <button id="play">Find a game</button>
       <p id="menuError"></p>
       <div class="controls">
         <span><b>WASD</b> move</span>

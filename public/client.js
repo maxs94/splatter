@@ -472,10 +472,16 @@ const avatars = new Map();     // remote id -> avatar
 const projectiles = new Map(); // key -> { mesh, p, v, born, offset }
 const round = { state: 'lobby', endsAt: 0, goUntil: 0 };
 let lobbyState = { players: [], leader: null };
+let roomsState = { rooms: [], max: 10 };
 
 let ws = null;
 let leaving = false;
-let screen = 'menu'; // menu | lobby | viewer | game
+let screen = 'menu'; // menu | browser | lobby | viewer | game
+// In a room (lobby or match), as opposed to the lobby browser. Messages of a room we
+// just left can still arrive; they are ignored while this is false.
+let inRoom = false;
+// Waiting for the server to answer a create or join.
+let joining = false;
 
 const lobby = createLobby(renderer, $('labels'), 420);
 const viewer = createViewer(renderer, $('labels'));
@@ -483,6 +489,7 @@ const viewer = createViewer(renderer, $('labels'));
 function showScreen(name) {
   screen = name;
   $('menu').hidden = name !== 'menu';
+  $('browser').hidden = name !== 'browser';
   $('lobbyUi').hidden = name !== 'lobby';
   $('viewerUi').hidden = name !== 'viewer';
   $('hud').hidden = name !== 'game';
@@ -747,7 +754,7 @@ function connect(name, color) {
   leaving = false;
   closeMessage = '';
   ws = new WebSocket(`${proto}://${location.host}`);
-  ws.onopen = () => send({ t: 'join', name, color, cid: clientId });
+  ws.onopen = () => send({ t: 'hello', name, color, cid: clientId });
   ws.onmessage = e => {
     const t = performance.now();
     const m = JSON.parse(e.data);
@@ -755,6 +762,8 @@ function connect(name, color) {
     perf.message(m.t, e.data.length, performance.now() - t);
   };
   ws.onclose = () => {
+    inRoom = false;
+    joining = false;
     clearMatch();
     showScreen('menu');
     $('play').disabled = false;
@@ -770,6 +779,15 @@ function leave() {
 }
 // Close the connection right away when the page goes (refresh, tab closed), so the
 // player leaves the lobby immediately instead of lingering.
+// Back from a lobby or match to the lobby browser; the connection stays open.
+function leaveRoom() {
+  if (screen === 'game') perf.finish('left the match');
+  send({ t: 'leaveRoom' });
+  inRoom = false;
+  clearMatch();
+  showScreen('browser');
+  renderBrowser();
+}
 window.addEventListener('pagehide', () => {
   if (screen === 'game') perf.flushOnExit('left the page');
   if (ws) { leaving = true; ws.close(); }
@@ -801,17 +819,35 @@ function enterGame(m) {
   }
 }
 
+const OUTSIDE_ROOM = new Set(['kicked', 'rooms', 'joinFailed', 'welcome']);
+
 function handle(m) {
+  if (!inRoom && !OUTSIDE_ROOM.has(m.t)) return;
   switch (m.t) {
     case 'kicked':
       closeMessage = 'You joined from another tab or window.';
       leaving = true;
       break;
-    case 'full':
-      closeMessage = `This game is full (${m.max} players).`;
-      leaving = true;
+    case 'rooms':
+      roomsState = m;
+      if (screen === 'menu') {
+        $('play').disabled = false;
+        showScreen('browser');
+      }
+      renderBrowser();
+      break;
+    case 'joinFailed':
+      joining = false;
+      $('browserError').textContent = m.reason === 'full'
+        ? `That lobby is full (${m.max} players).`
+        : 'That lobby is gone.';
+      renderBrowser();
       break;
     case 'welcome':
+      inRoom = true;
+      joining = false;
+      $('browserError').textContent = '';
+      $('lobbyTitle').textContent = m.room.name;
       me.id = m.id;
       me.life = m.life;
       if (m.phase === 'lobby') showScreen('lobby');
@@ -958,6 +994,7 @@ const CROWN = '<svg class="crown" viewBox="0 0 24 16" aria-hidden="true"><path d
 
 function renderLobby() {
   const { players, leader } = lobbyState;
+  $('lobbyTitle').textContent = lobbyState.name;
   const isLeader = leader === me.id;
   const leaderName = players.find(p => p.id === leader)?.name ?? 'the leader';
   $('lobbyList').innerHTML = players.map(p => `
@@ -1015,7 +1052,55 @@ $('startMatch').addEventListener('click', () => {
 $('openViewer').hidden = !DEBUG;
 $('openViewer').addEventListener('click', () => showScreen('viewer'));
 $('closeViewer').addEventListener('click', () => showScreen('lobby'));
-$('leaveLobby').addEventListener('click', leave);
+$('leaveLobby').addEventListener('click', leaveRoom);
+
+// ---------------------------------------------------------------- Lobby browser
+
+function renderBrowser() {
+  const { rooms, max } = roomsState;
+  const name = $('name').value.trim() || 'Player';
+  $('browserMe').innerHTML = `<span class="dot" style="background:${PALETTE[me.color]}"></span>${esc(name)}`;
+  $('roomName').placeholder = `${name}'s game`;
+  $('browserStatus').textContent = rooms.length
+    ? `${rooms.length} lobb${rooms.length === 1 ? 'y' : 'ies'} open. Join one or create your own.`
+    : 'No lobbies yet. Create one and give it a name.';
+  $('roomList').innerHTML = rooms.map(r => {
+    const full = r.players >= r.max;
+    return `
+    <li>
+      <div class="room-main">
+        <b>${esc(r.name)}</b>
+        <span>${r.phase === 'lobby' ? 'In lobby' : 'Match running'}${r.leader ? ` · led by ${esc(r.leader)}` : ''}</span>
+      </div>
+      <span class="room-count" title="Players">${r.players}<small>/${r.max}</small></span>
+      <span class="room-bots${r.bots ? ' on' : ''}">${r.bots ? 'Bots on' : 'Bots off'}</span>
+      <button class="btn" data-room="${esc(r.id)}"${full || joining ? ' disabled' : ''}>${full ? 'Full' : 'Join'}</button>
+    </li>`;
+  }).join('');
+  $('createRoom').disabled = joining;
+}
+
+$('roomList').addEventListener('click', e => {
+  const b = e.target.closest('button[data-room]');
+  if (!b || joining) return;
+  joining = true;
+  $('browserError').textContent = '';
+  send({ t: 'join', room: b.dataset.room });
+  renderBrowser();
+});
+{
+  const create = () => {
+    if (joining) return;
+    joining = true;
+    $('browserError').textContent = '';
+    send({ t: 'create', name: $('roomName').value.trim(), bots: $('createBots').checked });
+    $('roomName').value = '';
+    renderBrowser();
+  };
+  $('createRoom').addEventListener('click', create);
+  $('roomName').addEventListener('keydown', e => { if (e.key === 'Enter') create(); });
+}
+$('browserBack').addEventListener('click', leave);
 
 // ---------------------------------------------------------------- HUD
 
@@ -1215,7 +1300,7 @@ document.addEventListener('pointerlockchange', () => {
   slider.addEventListener('input', () => { setVolume(slider.value / 100); show(); });
   slider.addEventListener('change', () => { initAudio(); sfx.shoot(); });
   $('resume').addEventListener('click', () => { initAudio(); lockPointer(); });
-  $('leaveMatch').addEventListener('click', leave);
+  $('leaveMatch').addEventListener('click', leaveRoom);
 }
 
 // ---------------------------------------------------------------- Menu
