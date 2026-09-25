@@ -1169,6 +1169,18 @@ function updateVignette(dt) {
   $('vignette').style.opacity = Math.min(1, vignetteLevel * 0.9 + hurtFlash).toFixed(3);
 }
 
+// Life bar on the left, filled in the player's paint color.
+let healthLevel = 1;
+function updateHealth(dt) {
+  const hp = me.alive ? Math.max(0, me.hp) : 0;
+  healthLevel += (hp / C.MAX_HP - healthLevel) * Math.min(1, 10 * dt);
+  const el = $('health');
+  el.style.setProperty('--hp-color', PALETTE[me.color]);
+  el.classList.toggle('low', me.alive && hp / C.MAX_HP < 0.3);
+  $('healthFill').style.height = `${(healthLevel * 100).toFixed(1)}%`;
+  $('healthNum').textContent = Math.round(hp);
+}
+
 function sortedRoster() {
   return [...roster.values()].sort((a, b) => b.kills - a.kills || a.deaths - b.deaths);
 }
@@ -1245,6 +1257,7 @@ function updateHud(now, dt) {
   $('pauseMenu').hidden = locked();
   $('pauseTitle').textContent = round.state === 'loading' || round.state === 'countdown' ? 'Match starting' : 'Menu';
   updateVignette(dt);
+  updateHealth(dt);
 }
 
 // ---------------------------------------------------------------- Input
