@@ -83,6 +83,38 @@ html, body {
 }
 #toast.on { opacity: 1; transition: none; }
 
+/* Gun and magazine, bottom right */
+#ammo {
+  position: absolute; right: 24px; bottom: 22px; width: 200px; text-align: right;
+  text-shadow: 0 0 6px var(--paper), 0 0 2px var(--paper);
+}
+#ammoName { font-size: 13px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-soft); }
+#ammoCount { font-size: 40px; font-weight: 900; line-height: 1.05; font-variant-numeric: tabular-nums; }
+#ammoCount small { font-size: 18px; font-weight: 700; color: var(--ink-soft); }
+#ammoCount .reloading { font-size: 22px; font-weight: 800; }
+#ammo.low #ammoCount { color: var(--accent); }
+.ammo-track { height: 5px; margin-top: 4px; background: rgba(17, 17, 20, .12); border-radius: 3px; overflow: hidden; }
+#ammoBar { height: 100%; background: var(--ink); transform-origin: right; }
+#grenadeBox { margin-top: 10px; font-size: 14px; font-weight: 700; }
+#grenadeBox b { font-size: 20px; margin-left: 4px; }
+#grenadeBox.empty { opacity: .4; }
+#hud kbd {
+  display: inline-block; min-width: 20px; padding: 1px 5px; border: 2px solid var(--ink); border-radius: 4px;
+  font: 800 12px var(--font); text-align: center; background: var(--paper);
+}
+
+/* Gun picker while dead or before the round starts, keys 1-4 */
+#weaponPicker { position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%); text-align: center; }
+.picker-title { font-weight: 800; margin-bottom: 8px; text-shadow: 0 0 6px var(--paper); }
+.picker-cards { display: flex; gap: 10px; }
+.gun-card {
+  width: 150px; padding: 8px 10px; text-align: left; background: rgba(255, 255, 255, .92);
+  border: 3px solid rgba(17, 17, 20, .25); border-radius: 8px;
+}
+.gun-card.on { border-color: var(--ink); box-shadow: 4px 4px 0 var(--ink); }
+.gun-card b { display: block; margin-top: 4px; font-size: 16px; }
+.gun-card span { display: block; font-size: 12px; font-weight: 600; color: var(--ink-soft); }
+
 #splash {
   position: fixed; inset: 0; pointer-events: none; opacity: 0;
 }

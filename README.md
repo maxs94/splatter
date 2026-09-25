@@ -25,6 +25,24 @@ through paint on the ground loads your shoes with it, and the next steps leave c
 footprints that fade after a while. That also works for invisible players, so their trail
 gives them away.
 
+## Guns
+
+Pick a gun with **1** to **4**. It is yours from your next spawn until you are splatted
+(before the round starts it switches right away). Every gun holds a magazine: **R** reloads,
+an empty magazine reloads by itself, and there is no limit on reloads.
+
+| Gun | Rounds | Fire | Range | Hits to splat |
+|---|---|---|---|---|
+| Color gun | 30 | hold | far, in an arc | 4 |
+| Pistol | 10 | one shot per click | short (about 17 m) | 4 |
+| Rifle | 30 | hold, fast | middle (about 48 m) | 5 |
+| Sniper | 3 | one shot per click | whole arena, straight | 1 |
+
+Everyone also carries one **color grenade** per life, thrown when you release **Q**. It bounces, bursts
+after 1.6 seconds, paints every surface around it and hurts players within 13.5 m that it
+can see (more the closer they are). Guns and the grenade are defined in `WEAPONS` and
+`GRENADE` in `shared/game.js`.
+
 ## Match flow
 
 1. Pick a name and a paint color, then **Find a game**.

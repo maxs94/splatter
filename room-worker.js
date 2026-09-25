@@ -70,7 +70,7 @@ parentPort.on('message', async msg => {
       rooms.set(msg.room, { room: new Room(msg.room, msg.name, msg.bots, hooks(msg.room)), players: new Map() });
       break;
     case 'join':
-      if (e) e.players.set(msg.conn, e.room.addHuman(connection(msg.room, msg.conn), msg.name, msg.color, msg.cid));
+      if (e) e.players.set(msg.conn, e.room.addHuman(connection(msg.room, msg.conn), msg.name, msg.color, msg.cid, msg.weapon));
       break;
     case 'leave': {
       const p = e?.players.get(msg.conn);
