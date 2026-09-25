@@ -2,7 +2,7 @@
 // in worker threads (room-worker.js), any number side by side.
 
 import {
-  CONFIG as C, PALETTE, LEVEL, segBox, stepProjectile, hitPoint, groundHeight,
+  CONFIG as C, PALETTE, LEVEL, segBox, stepProjectile, hitPoint, groundHeight, spawnYaw,
 } from './shared/game.js';
 import { NavGraph } from './bots/nav.js';
 import { Bot, BOT_NAMES } from './bots/brain.js';
@@ -244,7 +244,7 @@ export class Room {
     const names = BOT_NAMES.map(n => `Bot ${n}`).filter(n => !taken.has(n));
     const name = names.length ? names[Math.floor(Math.random() * names.length)] : `Bot ${id}`;
     const pl = this.makePlayer(id, null, name, color);
-    pl.yaw = Math.atan2(pl.p[0], pl.p[2]);
+    pl.yaw = spawnYaw(pl.p);
     pl.bot = new Bot(pl, this.botGame, Math.min(1, Math.max(0, BOT_SKILL + (Math.random() - 0.5) * 0.3)));
     this.players.set(id, pl);
     this.broadcast({ t: 'join', player: this.publicInfo(pl) });

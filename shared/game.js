@@ -207,6 +207,28 @@ export function lineOfSight(a, b) {
   return true;
 }
 
+// Which way to look after spawning at p: the direction with the most open view at eye
+// height, leaning towards the arena center when several are about equally open.
+// Deterministic, so server, bots and clients agree without sending it.
+export function spawnYaw(p) {
+  const e = [p[0], p[1] + CONFIG.EYE_HEIGHT, p[2]];
+  const center = Math.atan2(p[0], p[2]);
+  const MAX_VIEW = 40, OPEN = 30, N = 32;
+  let best = center, bestScore = -Infinity;
+  for (let i = 0; i < N; i++) {
+    const yaw = center + (i / N) * Math.PI * 2;
+    const s = [-Math.sin(yaw) * MAX_VIEW, 0, -Math.cos(yaw) * MAX_VIEW];
+    let t = 1;
+    for (const b of boxes) {
+      const h = segBox(e, s, b.min, b.max, 0);
+      if (h && h.t < t) t = h.t;
+    }
+    const score = Math.min(t * MAX_VIEW, OPEN) + 4 * Math.cos(yaw - center);
+    if (score > bestScore) { bestScore = score; best = yaw; }
+  }
+  return Math.atan2(Math.sin(best), Math.cos(best));
+}
+
 // Highest walkable surface under (x, z) at or below fromY.
 export function groundHeight(x, z, fromY) {
   let y = 0;

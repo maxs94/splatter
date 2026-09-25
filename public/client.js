@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { CONFIG as C, PALETTE, LEVEL, movePlayer, stepProjectile, mulberry32, groundHeight } from '/shared/game.js';
+import { CONFIG as C, PALETTE, LEVEL, movePlayer, stepProjectile, mulberry32, groundHeight, spawnYaw } from '/shared/game.js';
 import { initAudio, play, tone, updateListener, getVolume, setVolume } from './js/audio.js';
 import { assetsReady, createCharacter, cloneGun, locomotion, poseCharacter, setAnim } from './js/characters.js';
 import { createLobby } from './js/lobby.js';
@@ -59,22 +59,30 @@ const surfaces = createSurfaces(renderer, blit);
 // smooth curves, and the shader cuts a sharp, anti-aliased edge at 50% coverage, so
 // borders stay smooth even though the paint textures are low resolution. The color
 // texture is painted slightly larger than the mask so edges don't get a light fringe.
+// Before a match, `reveal` (0..1) shades the unpainted faces lightly so the room can be seen.
+const REVEAL_SHADE = 1.0; // how much of SHADE shows (linear, so 1 still reads light)
 const PAINT_VERTEX = `
+  attribute float shade;
   varying vec2 vUv;
+  varying float vShade;
   void main() {
     vUv = uv;
+    vShade = shade;
     gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }`;
 const PAINT_FRAGMENT = `
   uniform sampler2D map;
   uniform sampler2D mask;
+  uniform float reveal;
   varying vec2 vUv;
+  varying float vShade;
   void main() {
     vec3 col = texture2D(map, vUv).rgb;
     float m = texture2D(mask, vUv).r;
     float w = max(fwidth(m) * 0.7, 0.002);
     float e = smoothstep(0.5 - w, 0.5 + w, m);
-    gl_FragColor = vec4(mix(vec3(1.0), col, e), 1.0);
+    vec3 base = vec3(mix(1.0, vShade, reveal * ${REVEAL_SHADE.toFixed(2)}));
+    gl_FragColor = vec4(mix(base, col, e), 1.0);
     #include <colorspace_fragment>
   }`;
 
@@ -137,8 +145,9 @@ for (const b of LEVEL.boxes) {
 
 // The whole level is one mesh, drawn in one call with the shared paint textures.
 surfaces.build(faces);
+let levelMat;
 {
-  const pos = [], uv = [], index = [];
+  const pos = [], uv = [], shade = [], index = [];
   for (const f of faces) {
     const base = pos.length / 3;
     for (const [u, v] of [[f.umin, f.vmin], [f.umax, f.vmin], [f.umax, f.vmax], [f.umin, f.vmax]]) {
@@ -146,17 +155,62 @@ surfaces.build(faces);
       p[f.axis] = f.plane; p[f.ua] = u; p[f.va] = v;
       pos.push(...p);
       uv.push(...surfaces.uv(f, u, v));
+      shade.push(f.shade);
     }
     index.push(base, base + 1, base + 2, base, base + 2, base + 3);
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  geo.setAttribute('shade', new THREE.Float32BufferAttribute(shade, 1));
   geo.setIndex(index);
-  scene.add(new THREE.Mesh(geo, new THREE.ShaderMaterial({
-    uniforms: { map: { value: surfaces.color.texture }, mask: { value: surfaces.mask.texture } },
+  levelMat = new THREE.ShaderMaterial({
+    uniforms: { map: { value: surfaces.color.texture }, mask: { value: surfaces.mask.texture }, reveal: { value: 0 } },
     vertexShader: PAINT_VERTEX, fragmentShader: PAINT_FRAGMENT, side: THREE.DoubleSide,
-  })));
+    // Pushed back a little so the outlines on its edges win the depth test.
+    polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
+  });
+  scene.add(new THREE.Mesh(geo, levelMat));
+}
+
+// Outlines of every box, shown with the shading before a match. Floor tiles only get
+// their top edges, which draws a grid on the ground.
+const levelLines = (() => {
+  const pos = [];
+  for (const b of LEVEL.boxes) {
+    const c = i => [i & 1 ? b.max[0] : b.min[0], i & 2 ? b.max[1] : b.min[1], i & 4 ? b.max[2] : b.min[2]];
+    // Corners are numbered by bits (x, y, z); an edge joins corners that differ in one bit.
+    for (let i = 0; i < 8; i++) {
+      for (const bit of [1, 2, 4]) {
+        const j = i | bit;
+        if (j === i) continue;
+        if (b.floor && !((i & 2) && (j & 2))) continue;
+        pos.push(...c(i), ...c(j));
+      }
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  const lines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0x9a9aa2, transparent: true, depthWrite: false }));
+  lines.visible = false;
+  scene.add(lines);
+  return lines;
+})();
+
+// How much of the room shows (0..1): all of it while the match loads and counts down,
+// fading out in the last REVEAL_FADE ms before GO.
+const REVEAL_FADE = 1000;
+function revealAmount(now) {
+  if (round.state === 'loading') return 1;
+  if (round.state === 'countdown') return Math.min(1, Math.max(0, (round.endsAt - now) / REVEAL_FADE));
+  return 0;
+}
+
+function updateReveal(now) {
+  const r = revealAmount(now);
+  levelMat.uniforms.reveal.value = r;
+  levelLines.material.opacity = r;
+  levelLines.visible = r > 0;
 }
 
 function clearPaint() {
@@ -979,7 +1033,7 @@ function placeMe(p) {
   me.hp = C.MAX_HP;
   me.alive = true;
   me.killedBy = null;
-  me.yaw = Math.atan2(p[0], p[2]); // face the arena center
+  me.yaw = spawnYaw(p); // face the most open direction
   me.pitch = 0;
 }
 
@@ -1430,6 +1484,7 @@ function gameFrame(now, dt) {
   timed('paintflow', () => paintFlow.update(dt));
   timed('footprints', () => updateFootprints(dt));
   timed('hud', () => updateHud(now, dt));
+  updateReveal(now);
   timed('flushPaint', () => surfaces.flush());
   timed('fluid.update', () => fluid.update(dt));
   timed('render', () => fluid.render(scene, camera));
