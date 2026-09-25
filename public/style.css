@@ -58,6 +58,27 @@ html, body {
   text-shadow: 0 0 6px var(--paper), 0 0 2px var(--paper);
 }
 
+/* Life bar on the left, filled in the player's paint color. */
+#health {
+  position: absolute; left: 16px; top: 50%; transform: translateY(-50%);
+  width: 16px; height: 200px;
+  border: 3px solid var(--ink); border-radius: 6px; overflow: visible;
+  background: rgba(255, 255, 255, .6);
+  box-shadow: 0 0 6px var(--paper), 0 0 0 1.5px var(--paper);
+}
+#healthFill {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 100%;
+  border-radius: 2px; background: var(--hp-color, var(--ink));
+}
+#healthNum {
+  position: absolute; top: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+  font-size: 13px; font-weight: 800; font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 6px var(--paper), 0 0 2px var(--paper);
+}
+#health.low { border-color: var(--accent); animation: healthPulse .8s ease-in-out infinite alternate; }
+#health.low #healthNum { color: var(--accent); }
+@keyframes healthPulse { to { box-shadow: 0 0 10px var(--accent), 0 0 0 1.5px var(--paper); } }
+
 #feed {
   position: absolute; top: 64px; left: 16px;
   display: flex; flex-direction: column; gap: 4px; font-size: 15px; font-weight: 600;

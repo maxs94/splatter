@@ -3,7 +3,7 @@
 
 import {
   CONFIG as C, WEAPONS, GRENADE, PALETTE, LEVEL, segBox, segLevel, stepProjectile, hitPoint,
-  groundHeight, lineOfSight, spawnYaw,
+  groundHeight, lineOfSight, spawnYaw, playerHeight, eyeHeight,
 } from './shared/game.js';
 import { NavGraph } from './bots/nav.js';
 import { Bot, BOT_NAMES } from './bots/brain.js';
@@ -81,7 +81,7 @@ export class Room {
 
   makePlayer(id, ws, name, color) {
     return {
-      id, ws, name, color, p: this.pickSpawn(id), v: [0, 0, 0], onGround: false, yaw: 0, pitch: 0,
+      id, ws, name, color, p: this.pickSpawn(id), v: [0, 0, 0], onGround: false, crouch: false, yaw: 0, pitch: 0,
       hp: C.MAX_HP, alive: false, life: 0, kills: 0, deaths: 0, respawnAt: 0, lastShot: 0,
       lastDamage: 0, sentHp: C.MAX_HP, paintHits: 0, ready: false, bot: null,
       // The gun of this life, the one picked for the next, and its magazine.
@@ -143,6 +143,7 @@ export class Room {
   respawn(p) {
     p.p = this.pickSpawn(p.id);
     p.v = [0, 0, 0];
+    p.crouch = false;
     p.hp = p.sentHp = C.MAX_HP;
     p.alive = true;
     p.paintHits = 0;
@@ -422,12 +423,13 @@ export class Room {
       ];
       me.yaw = m.y;
       me.pitch = m.x;
+      me.crouch = m.c === 1;
     } else if (m.t === 'shoot' || m.t === 'nade') {
       if (!vec(m.o) || !vec(m.d)) return;
       const len = Math.hypot(...m.d);
       if (len < 1e-6) return;
       const d = m.d.map(x => x / len);
-      const eye = [me.p[0], me.p[1] + C.EYE_HEIGHT, me.p[2]];
+      const eye = [me.p[0], me.p[1] + eyeHeight(me), me.p[2]];
       const o = Math.hypot(m.o[0] - eye[0], m.o[1] - eye[1], m.o[2] - eye[2]) < 3
         ? m.o.slice()
         : eye.map((e, i) => e + d[i] * C.MUZZLE_OFFSET);
@@ -474,7 +476,7 @@ export class Room {
       for (const pl of players.values()) {
         if (pl.id === pr.owner || !pl.alive) continue;
         const r = C.PLAYER_RADIUS;
-        const h = segBox(o, s, [pl.p[0] - r, pl.p[1], pl.p[2] - r], [pl.p[0] + r, pl.p[1] + C.PLAYER_HEIGHT, pl.p[2] + r], C.BLOB_RADIUS);
+        const h = segBox(o, s, [pl.p[0] - r, pl.p[1], pl.p[2] - r], [pl.p[0] + r, pl.p[1] + playerHeight(pl), pl.p[2] + r], C.BLOB_RADIUS);
         if (h && (!ph || h.t < ph.t)) ph = { ...h, pl };
       }
 
@@ -532,7 +534,7 @@ export class Room {
   sendStates() {
     const l = [];
     for (const p of this.players.values()) {
-      if (p.alive) l.push([p.id, r3(p.p[0]), r3(p.p[1]), r3(p.p[2]), r3(p.yaw), r3(p.pitch)]);
+      if (p.alive) l.push([p.id, r3(p.p[0]), r3(p.p[1]), r3(p.p[2]), r3(p.yaw), r3(p.pitch), p.crouch ? 1 : 0]);
     }
     if (l.length) this.broadcast({ t: 'st', l });
   }

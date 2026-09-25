@@ -6,6 +6,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 
 export const RUN_CLIP_SPEED = 3.72; // m/s the run clip was captured at
+export const CROUCH_CLIP_SPEED = 1.61; // m/s the crouch_walk clip covers
 export const MAX_TWIST = 1.2;       // how far the legs turn towards the move direction (rad)
 const ARM_BONES = ['RightArm', 'RightForeArm', 'LeftArm', 'LeftForeArm'];
 const UP = new THREE.Vector3(0, 1, 0);
@@ -111,9 +112,10 @@ export function setAnim(ch, state, fade = 0.2) {
   ch.state = state;
 }
 
-// Picks idle / run / jump from the movement and returns the leg twist towards the
-// direction of travel. Running backwards plays the run clip in reverse.
-export function locomotion(ch, vel, yaw, airborne) {
+// Picks idle / run / jump (crouch_idle / crouch_walk while crouching) from the movement
+// and returns the leg twist towards the direction of travel. Moving backwards plays the
+// run or crouch walk clip in reverse.
+export function locomotion(ch, vel, yaw, airborne, crouch = false) {
   const speed = Math.hypot(vel.x, vel.z);
   if (airborne) {
     if (ch.state !== 'jump') {
@@ -130,11 +132,12 @@ export function locomotion(ch, vel, yaw, airborne) {
     const backwards = Math.abs(rel) > 1.9;
     let twist = backwards ? Math.atan2(Math.sin(rel + Math.PI), Math.cos(rel + Math.PI)) : rel;
     twist = Math.max(-MAX_TWIST, Math.min(MAX_TWIST, twist));
-    setAnim(ch, 'run');
-    ch.actions.run.timeScale = Math.min(2.2, speed / RUN_CLIP_SPEED) * (backwards ? -1 : 1);
+    const clip = crouch ? 'crouch_walk' : 'run';
+    setAnim(ch, clip);
+    ch.actions[clip].timeScale = Math.min(2.2, speed / (crouch ? CROUCH_CLIP_SPEED : RUN_CLIP_SPEED)) * (backwards ? -1 : 1);
     return twist;
   }
-  setAnim(ch, 'idle', 0.3);
+  setAnim(ch, crouch ? 'crouch_idle' : 'idle', 0.3);
   return 0;
 }
 

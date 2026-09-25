@@ -141,6 +141,7 @@ matched with the other.
 | --- | --- |
 | WASD / arrows | Move |
 | Space | Jump |
+| C (hold) | Crouch: smaller, slower and quieter, behind low cover bots can't see you. You stand up once there is room |
 | Mouse | Aim |
 | Left click (hold) | Shoot |
 | Tab (hold) | Stats (also shown while waiting to respawn) |
@@ -206,6 +207,12 @@ shot hit; the bones of the model follow it.
 In game the legs and torso play the mocap while the arms are held in the aim pose, the legs
 turn towards the direction of travel and the spine turns and bends towards where the
 player aims. Running backwards plays the run clip in reverse.
+
+The crouch clips are not mocap: `assets/crouch_anims.py` builds them in Blender on top of
+the idle pose. The hips drop and lean forward, the head stays level and IK places the feet:
+planted for `crouch_idle`, a stepping cycle in place for `crouch_walk` (1.6 m/s, sped up to
+the crouch speed in game, like the run clip). The script's header explains how to rerun it
+and export the model.
 
 The data used in this project was obtained from mocap.cs.cmu.edu. The database was created
 with funding from NSF EIA-0196217.

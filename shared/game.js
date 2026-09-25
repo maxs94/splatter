@@ -7,7 +7,10 @@ export const CONFIG = {
   PLAYER_RADIUS: 0.4,
   PLAYER_HEIGHT: 1.8,
   EYE_HEIGHT: 1.6,
+  CROUCH_HEIGHT: 1.4,
+  CROUCH_EYE_HEIGHT: 1.2,
   MOVE_SPEED: 7,
+  CROUCH_SPEED: 2.8,
   JUMP_SPEED: 7.5,
   GRAVITY: 20,
   STEP_HEIGHT: 0.45,
@@ -277,8 +280,11 @@ export function groundHeight(x, z, fromY) {
 
 // ---------------------------------------------------------------- Player movement
 
-function overlapping(p) {
-  const r = CONFIG.PLAYER_RADIUS, h = CONFIG.PLAYER_HEIGHT;
+export const playerHeight = s => (s.crouch ? CONFIG.CROUCH_HEIGHT : CONFIG.PLAYER_HEIGHT);
+export const eyeHeight = s => (s.crouch ? CONFIG.CROUCH_EYE_HEIGHT : CONFIG.EYE_HEIGHT);
+
+function overlapping(p, h) {
+  const r = CONFIG.PLAYER_RADIUS;
   const out = [];
   for (const b of boxes) {
     if (p[0] + r > b.min[0] && p[0] - r < b.max[0] &&
@@ -288,29 +294,35 @@ function overlapping(p) {
   return out;
 }
 
-// s: { p:[x,y,z] (feet), v:[vx,vy,vz], onGround }, inp: { f, r, jump, yaw }
+// s: { p:[x,y,z] (feet), v:[vx,vy,vz], onGround, crouch }, inp: { f, r, jump, crouch, yaw }
 export function movePlayer(s, inp, dt) {
+  // Crouching lasts while held, and after letting go until there is room to stand up.
+  if (inp.crouch) s.crouch = true;
+  else if (s.crouch && !overlapping(s.p, CONFIG.PLAYER_HEIGHT).length) s.crouch = false;
+  const h = playerHeight(s);
+  const speed = s.crouch ? CONFIG.CROUCH_SPEED : CONFIG.MOVE_SPEED;
+
   const sin = Math.sin(inp.yaw), cos = Math.cos(inp.yaw);
   let wx = -sin * inp.f + cos * inp.r;
   let wz = -cos * inp.f - sin * inp.r;
   const len = Math.hypot(wx, wz);
   if (len > 0) { wx /= len; wz /= len; }
   const k = Math.min(1, (s.onGround ? 14 : 3) * dt);
-  s.v[0] += (wx * CONFIG.MOVE_SPEED - s.v[0]) * k;
-  s.v[2] += (wz * CONFIG.MOVE_SPEED - s.v[2]) * k;
-  if (inp.jump && s.onGround) { s.v[1] = CONFIG.JUMP_SPEED; s.onGround = false; }
+  s.v[0] += (wx * speed - s.v[0]) * k;
+  s.v[2] += (wz * speed - s.v[2]) * k;
+  if (inp.jump && s.onGround && !s.crouch) { s.v[1] = CONFIG.JUMP_SPEED; s.onGround = false; }
 
   for (const ax of [0, 2]) {
     const step = s.v[ax] * dt;
     if (!step) continue;
     const np = s.p.slice();
     np[ax] += step;
-    const hits = overlapping(np);
+    const hits = overlapping(np, h);
     if (!hits.length) { s.p = np; continue; }
     const top = Math.max(...hits.map(b => b.max[1]));
     if (s.onGround && top - s.p[1] <= CONFIG.STEP_HEIGHT) {
       np[1] = top;
-      if (!overlapping(np).length) { s.p = np; continue; }
+      if (!overlapping(np, h).length) { s.p = np; continue; }
     }
     s.v[ax] = 0;
   }
@@ -318,7 +330,7 @@ export function movePlayer(s, inp, dt) {
   s.v[1] -= CONFIG.GRAVITY * dt;
   const np = s.p.slice();
   np[1] += s.v[1] * dt;
-  const hits = overlapping(np);
+  const hits = overlapping(np, h);
   if (!hits.length) {
     s.p = np;
     s.onGround = false;
@@ -327,7 +339,7 @@ export function movePlayer(s, inp, dt) {
     s.v[1] = 0;
     s.onGround = true;
   } else {
-    s.p[1] = Math.min(...hits.map(b => b.min[1])) - CONFIG.PLAYER_HEIGHT - 1e-4;
+    s.p[1] = Math.min(...hits.map(b => b.min[1])) - h - 1e-4;
     s.v[1] = 0;
   }
 }

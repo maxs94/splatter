@@ -37,6 +37,8 @@ const gauss = () => {
 const angDiff = (a, b) => Math.atan2(Math.sin(a - b), Math.cos(a - b));
 const eye = p => [p[0], p[1] + C.EYE_HEIGHT, p[2]];
 const chest = p => [p[0], p[1] + 1.15, p[2]];
+// A player's chest, lower while they crouch.
+const chestOf = q => [q.p[0], q.p[1] + (q.crouch ? 0.85 : 1.15), q.p[2]];
 const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 const hdist = (a, b) => Math.hypot(a[0] - b[0], a[2] - b[2]);
 const dirOf = (yaw, pitch) => [-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch)];
@@ -200,7 +202,7 @@ const BEHAVIORS = {
     while (this.now() < end) {
       const q = this.game.players.get(id);
       if (!m || !q || !q.alive) return false;
-      this.lookAt(chest(m.visible ? q.p : m.pos));
+      this.lookAt(m.visible ? chestOf(q) : chest(m.pos));
       yield;
     }
     m.reacted = true;
@@ -407,7 +409,7 @@ export class Bot {
     const now = this.now(), me = this.pl, e = eye(me.p);
     for (const q of this.game.players.values()) {
       if (q === me || !q.alive) continue;
-      const target = chest(q.p);
+      const target = chestOf(q);
       const d = dist(e, target);
       const m = this.memory.get(q.id);
       const tracking = m && m.visible && now - m.lastVisible < SENSE.trackGraceMs;
@@ -654,7 +656,7 @@ export class Bot {
     const lead = this.skill * 0.7;
     this.aimBallistic([
       base[0] + m.vel[0] * flight * lead,
-      base[1] + 1.15,
+      base[1] + (m.visible && q.crouch ? 0.85 : 1.15),
       base[2] + m.vel[2] * flight * lead,
     ], this.rangeErr);
   }
