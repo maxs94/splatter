@@ -1,5 +1,5 @@
-// One game: a lobby with its players and settings, and the match they play. The server
-// runs any number of rooms side by side (see server.js).
+// One game: a lobby with its players and settings, and the match they play. Rooms run
+// in worker threads (room-worker.js), any number side by side.
 
 import {
   CONFIG as C, PALETTE, LEVEL, segBox, stepProjectile, hitPoint, groundHeight,
@@ -16,10 +16,12 @@ export const DEFAULT_BOTS = Math.min(MAX_PLAYERS - 1, Math.max(0, Number(process
 // Bot skill 0..1, each bot gets a bit of random variation around it.
 const BOT_SKILL = Math.min(1, Math.max(0, Number(process.env.BOT_SKILL ?? 0.4)));
 
-// The level never changes, so all rooms share one navigation graph.
-const nav = new NavGraph();
+// The level never changes, so all rooms of a thread share one navigation graph. Built
+// by prepare() or the first room, so the main thread can import this file without it.
+let nav = null;
+export function prepare() { nav ??= new NavGraph(); }
 
-// Ids are unique across all rooms.
+// Ids are unique across the rooms of a thread.
 let nextPlayerId = 1;
 let nextProjectileId = 1;
 
@@ -50,6 +52,7 @@ export class Room {
     // Lobby settings chosen by the leader.
     this.settings = { bots, botCount: Math.max(1, DEFAULT_BOTS) };
     this.profiling = false;
+    prepare();
     this.botGame = {
       players: this.players, nav,
       fire: (pl, o, d) => this.fire(pl, o, d),
@@ -71,7 +74,6 @@ export class Room {
   humans() { return [...this.players.values()].filter(p => !p.bot); }
   humanCount() { return this.humans().length; }
   botCount() { return this.players.size - this.humanCount(); }
-  isFull() { return this.humanCount() >= MAX_PLAYERS; }
   // The longest connected human leads the lobby.
   leaderId() { return this.humans().reduce((best, p) => (best === null || p.id < best ? p.id : best), null); }
 
@@ -269,7 +271,8 @@ export class Room {
 
   // ---------------------------------------------------------------- Humans
 
-  // Adds a human (the server checked isFull() first) and returns the player.
+  // Adds a human (the server checked that the room has space) and returns the player.
+  // ws is anything with send(data), readyState and OPEN.
   addHuman(ws, name, color, cid) {
     const id = nextPlayerId++;
     const me = this.makePlayer(id, ws, name, color);

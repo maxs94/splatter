@@ -6,6 +6,7 @@ services:
     environment:
       BOTS: "3"        # default number of bots in a new lobby (the leader can change it)
       BOT_SKILL: "0.4" # 0 = hopeless, 1 = sharp
+      WORKERS: "0"     # threads running the lobbies, 0 = one per CPU minus one
       PROFILE: "0"     # 1 = profile the server, reports go to ./profiles
       PROFILE_CPU: "0" # 1 = also record a CPU profile per match (open in Chrome DevTools)
     volumes:

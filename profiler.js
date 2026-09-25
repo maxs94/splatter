@@ -9,12 +9,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import inspector from 'node:inspector';
+import { isMainThread, threadId } from 'node:worker_threads';
 import { monitorEventLoopDelay, PerformanceObserver, performance } from 'node:perf_hooks';
 
 const ENABLED = process.env.PROFILE === '1' || process.env.PROFILE_CPU === '1';
 const CPU = process.env.PROFILE_CPU === '1';
 const DIR = path.resolve(process.env.PROFILE_DIR || 'profiles');
 const TICK_BUDGET_MS = 1000 / 60;
+// Every room thread profiles itself; its logs and reports are tagged with the thread.
+const TAG = isMainThread ? '' : ` t${threadId}`;
+const LOG = `[profile${TAG}]`;
 
 const round = (x, d = 2) => Math.round(x * 10 ** d) / 10 ** d;
 const ELD_RESOLUTION_MS = 10;
@@ -45,7 +49,7 @@ class Profiler {
     this.session = null;
     this.reset();
     fs.mkdirSync(DIR, { recursive: true });
-    console.log(`[profile] enabled${CPU ? ' with CPU profiles' : ''}, reports go to ${DIR}`);
+    console.log(`${LOG} enabled${CPU ? ' with CPU profiles' : ''}, reports go to ${DIR}`);
   }
 
   reset(meta = {}) {
@@ -143,7 +147,7 @@ class Profiler {
       .map(([k, v]) => `${k} ${round(v / (recent.length || 1), 3)}`).join(', ');
     this._lastSections = new Map([...this.sections.entries()].map(([k, v]) => [k, v.total]));
     const g = Object.entries(gauges).map(([k, v]) => `${k} ${v}`).join(' ');
-    console.log(`[profile] ${entry.atSec}s tick avg ${entry.tickAvgMs} p95 ${entry.tickP95Ms} max ${entry.tickMaxMs} ms | ms/tick: ${deltas} | ${g} | heap ${entry.heapMB} MB, loop delay p99 ${lateMs(this.eld.percentile(99))} ms`);
+    console.log(`${LOG} ${entry.atSec}s tick avg ${entry.tickAvgMs} p95 ${entry.tickP95Ms} max ${entry.tickMaxMs} ms | ms/tick: ${deltas} | ${g} | heap ${entry.heapMB} MB, loop delay p99 ${lateMs(this.eld.percentile(99))} ms`);
   }
 
   // Saves a report uploaded by a browser (see public/js/perf.js).
@@ -153,7 +157,7 @@ class Profiler {
     const base = path.join(DIR, `browser-${stamp}-${who}`);
     fs.writeFileSync(`${base}.json`, JSON.stringify(report, null, 2));
     if (typeof text === 'string') fs.writeFileSync(`${base}.txt`, text.slice(0, 1_000_000));
-    console.log(`[profile] saved browser report ${base}.txt`);
+    console.log(`${LOG} saved browser report ${base}.txt`);
   }
 
   matchStart(meta) {
@@ -164,12 +168,12 @@ class Profiler {
   async matchEnd(reason, extra = {}) {
     if (!this.ticks.length) return;
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const base = path.join(DIR, `match-${stamp}`);
+    const base = path.join(DIR, `match-${stamp}${TAG.replace(' ', '-')}`);
     const report = this.report(reason, extra);
     fs.writeFileSync(`${base}.json`, JSON.stringify(report, null, 2));
     fs.writeFileSync(`${base}.txt`, this.text(report));
     if (CPU) await this.stopCpu(`${base}.cpuprofile`);
-    console.log(`[profile] wrote ${base}.txt`);
+    console.log(`${LOG} wrote ${base}.txt`);
     this.reset();
   }
 
@@ -180,7 +184,7 @@ class Profiler {
       this.session.post('Profiler.enable');
       this.session.post('Profiler.start');
     } catch (e) {
-      console.log('[profile] CPU profiling unavailable:', e.message);
+      console.log(`${LOG} CPU profiling unavailable:`, e.message);
       this.session = null;
     }
   }

@@ -98,8 +98,9 @@ Run with `BOT_DEBUG=1` to log every plan the bots make.
 
 Set `PROFILE: "1"` in `docker-compose.yml` (and rebuild) to profile the server. While a
 match runs it logs a line every 5 s (`docker compose logs -f`), and after every match it
-writes a report to `./profiles/`. With several lobbies playing at once, a report covers
-the whole server from the first match starting until no match is running any more: tick times against the 16.7 ms budget, time per code
+writes a report to `./profiles/`. Every lobby thread profiles itself (log lines and
+report files are tagged `t1`, `t2`, ...), and a report covers that thread from the first of
+its matches starting until none of them runs any more: tick times against the 16.7 ms budget, time per code
 section (bots split into perception, planning, cover search, pathfinding, behaviors,
 movement), counters, network traffic per message type, event loop delay, GC, memory and
 the slowest ticks. `PROFILE_CPU: "1"` also records a `.cpuprofile` per match, which opens
@@ -129,8 +130,12 @@ matched with the other.
 
 ## How it works
 
-- `server.js` serves the static files, keeps the list of lobbies and routes every
-  WebSocket (`ws`) connection to its lobby. One 60 Hz loop advances all of them.
+- `server.js` serves the static files, holds every WebSocket (`ws`) connection and the
+  list of lobbies, and forwards messages between players and their lobby.
+- Lobbies run in worker threads (`room-worker.js`), so several matches use several CPUs.
+  By default there is one thread per CPU minus one (the main thread handles the network);
+  `WORKERS` sets a fixed number. A new lobby goes to the thread with the fewest lobbies,
+  and each thread advances its lobbies at 60 Hz.
 - `room.js` is one lobby and its authoritative match: it simulates every paint blob against
   the level and the players, applies damage, handles kills, respawns, rounds and bots, and
   keeps a list of splats for players who join late.
